@@ -33,6 +33,7 @@ const MONTH_NAMES = [
 const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI"];
 
 type PLMode = "tax" | "true";
+type BenchmarkView = "return" | "alpha";
 
 type DailyEntry = {
   date: Date;
@@ -481,8 +482,10 @@ export default function Page() {
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const [plMode, setPlMode] = useState<PLMode>("tax");
+  const [benchmarkView, setBenchmarkView] = useState<BenchmarkView>("return");
   const [benchmarkData, setBenchmarkData] = useState<BenchmarkData | null>(null);
   const [benchmarkError, setBenchmarkError] = useState("");
+  const [benchmarkLoading, setBenchmarkLoading] = useState(false);
 
   const { dailyMap, months, hasDisallowedLossColumn } = useMemo(
     () => buildDailyData(rows),
@@ -498,6 +501,7 @@ export default function Page() {
     if (!entries.length) {
       setBenchmarkData(null);
       setBenchmarkError("");
+      setBenchmarkLoading(false);
       return;
     }
 
@@ -505,6 +509,7 @@ export default function Page() {
 
     async function loadBenchmarks() {
       try {
+        setBenchmarkLoading(true);
         setBenchmarkError("");
 
         const res = await fetch("/api/benchmarks");
@@ -520,6 +525,10 @@ export default function Page() {
       } catch {
         if (!cancelled) {
           setBenchmarkError("Could not load SPY / QQQ benchmark data.");
+        }
+      } finally {
+        if (!cancelled) {
+          setBenchmarkLoading(false);
         }
       }
     }
@@ -724,53 +733,94 @@ export default function Page() {
           />
         </section>
 
-        {benchmark && (
+        {(benchmarkLoading || benchmark || benchmarkError) && (
           <section className="rounded-2xl border border-slate-800 bg-slate-900/80 px-4 py-3 shadow-lg">
-            <div className="flex flex-wrap items-center gap-3 text-sm">
-              <span className="inline-flex items-center gap-2 text-xs font-semibold tracking-wide text-slate-400">
-                <Activity className="h-3.5 w-3.5" />
-                Benchmark
-              </span>
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="inline-flex items-center gap-2 text-xs font-semibold tracking-wide text-slate-400">
+                  <Activity className="h-3.5 w-3.5" />
+                  Benchmark
+                </div>
 
-              <span className="rounded-lg bg-teal-900/60 px-3 py-1 font-semibold text-teal-300">
-                You {formatPercent(benchmark.your)}
-              </span>
+                <div className="inline-flex rounded-xl border border-slate-700 bg-slate-950 p-1">
+                  <button
+                    onClick={() => setBenchmarkView("return")}
+                    className={`rounded-lg px-3 py-1 text-xs ${
+                      benchmarkView === "return"
+                        ? "bg-slate-700 text-white"
+                        : "text-slate-300 hover:bg-slate-800"
+                    }`}
+                  >
+                    % Return
+                  </button>
+                  <button
+                    onClick={() => setBenchmarkView("alpha")}
+                    className={`rounded-lg px-3 py-1 text-xs ${
+                      benchmarkView === "alpha"
+                        ? "bg-slate-700 text-white"
+                        : "text-slate-300 hover:bg-slate-800"
+                    }`}
+                  >
+                    Alpha
+                  </button>
+                </div>
+              </div>
 
-              <span className="rounded-lg bg-slate-800 px-3 py-1 text-slate-300">
-                SPY {formatPercent(benchmark.spy)}
-              </span>
+              {benchmarkLoading && (
+                <div className="text-sm text-slate-400">Loading market comparison...</div>
+              )}
 
-              <span className="rounded-lg bg-purple-900/40 px-3 py-1 text-purple-300">
-                QQQ {formatPercent(benchmark.qqq)}
-              </span>
+              {!benchmarkLoading && benchmarkError && (
+                <div className="text-sm text-slate-400">
+                  Benchmark unavailable (data couldn’t load)
+                </div>
+              )}
 
-              <span className="text-slate-500">|</span>
+              {!benchmarkLoading && !benchmarkError && benchmark && (
+                <>
+                  {benchmarkView === "return" ? (
+                    <div className="flex flex-wrap items-center gap-3 text-sm">
+                      <span className="rounded-lg bg-teal-900/60 px-3 py-1 font-semibold text-teal-300">
+                        You {formatPercent(benchmark.your)}
+                      </span>
 
-              <span className="text-xs text-slate-400">α vs SPY</span>
-              <span
-                className={`text-sm font-semibold ${
-                  benchmark.alphaSpy >= 0 ? "text-teal-400" : "text-red-400"
-                }`}
-              >
-                {formatPercent(benchmark.alphaSpy)}
-              </span>
+                      <span className="rounded-lg bg-slate-800 px-3 py-1 text-slate-300">
+                        SPY {formatPercent(benchmark.spy)}
+                      </span>
 
-              <span className="text-xs text-slate-400">vs QQQ</span>
-              <span
-                className={`text-sm font-semibold ${
-                  benchmark.alphaQqq >= 0 ? "text-teal-400" : "text-red-400"
-                }`}
-              >
-                {formatPercent(benchmark.alphaQqq)}
-              </span>
+                      <span className="rounded-lg bg-purple-900/40 px-3 py-1 text-purple-300">
+                        QQQ {formatPercent(benchmark.qqq)}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-3 text-sm">
+                      <span className="text-xs text-slate-400">α vs SPY</span>
+                      <span
+                        className={`rounded-lg px-3 py-1 font-semibold ${
+                          benchmark.alphaSpy >= 0
+                            ? "bg-teal-900/40 text-teal-300"
+                            : "bg-red-900/40 text-red-300"
+                        }`}
+                      >
+                        {formatPercent(benchmark.alphaSpy)}
+                      </span>
+
+                      <span className="text-xs text-slate-400">α vs QQQ</span>
+                      <span
+                        className={`rounded-lg px-3 py-1 font-semibold ${
+                          benchmark.alphaQqq >= 0
+                            ? "bg-teal-900/40 text-teal-300"
+                            : "bg-red-900/40 text-red-300"
+                        }`}
+                      >
+                        {formatPercent(benchmark.alphaQqq)}
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </section>
-        )}
-
-        {benchmarkError && (
-          <div className="rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-            {benchmarkError}
-          </div>
         )}
 
         {months.length === 0 ? (
