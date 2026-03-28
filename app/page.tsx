@@ -1,10 +1,19 @@
-
 "use client";
 
 import React, { useMemo, useState } from "react";
 import Papa from "papaparse";
 import html2canvas from "html2canvas";
-import { Upload, Calendar as CalendarIcon, BarChart3, Download } from "lucide-react";
+import {
+  Upload,
+  Calendar as CalendarIcon,
+  BarChart3,
+  Download,
+  TrendingUp,
+  TrendingDown,
+  ShieldCheck,
+  Sparkles,
+  FileUp,
+} from "lucide-react";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -50,13 +59,13 @@ function getBusinessCalendarWeeks(year: number, month: number): Date[][] {
   const first = new Date(year, month, 1);
   const last = new Date(year, month + 1, 0);
 
-  const firstWeekday = (first.getDay() + 6) % 7; // Monday=0
+  const firstWeekday = (first.getDay() + 6) % 7;
   const start = new Date(first);
   start.setDate(first.getDate() - firstWeekday);
 
-  const lastWeekday = (last.getDay() + 6) % 7; // Monday=0
+  const lastWeekday = (last.getDay() + 6) % 7;
   const end = new Date(last);
-  end.setDate(last.getDate() + Math.max(0, 4 - lastWeekday)); // extend to Friday
+  end.setDate(last.getDate() + Math.max(0, 4 - lastWeekday));
 
   const weeks: Date[][] = [];
   const cursor = new Date(start);
@@ -67,7 +76,7 @@ function getBusinessCalendarWeeks(year: number, month: number): Date[][] {
       week.push(new Date(cursor));
       cursor.setDate(cursor.getDate() + 1);
     }
-    cursor.setDate(cursor.getDate() + 2); // skip weekend
+    cursor.setDate(cursor.getDate() + 2);
     weeks.push(week);
   }
 
@@ -136,24 +145,63 @@ function buildDailyData(rows: Record<string, unknown>[]) {
 }
 
 function tileClasses(value: number, muted: boolean) {
-  if (muted) return "bg-slate-900/40 border-slate-800 text-slate-500";
-  if (value > 10000) return "bg-emerald-900 border-emerald-700";
-  if (value > 0) return "bg-teal-800 border-teal-700";
-  if (value < -10000) return "bg-red-950 border-red-800";
-  if (value < 0) return "bg-red-900 border-red-700";
+  if (muted) return "bg-slate-900/30 border-slate-800 text-slate-600";
+  if (value > 10000) return "bg-emerald-900/90 border-emerald-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
+  if (value > 0) return "bg-teal-800/90 border-teal-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
+  if (value < -10000) return "bg-red-950 border-red-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
+  if (value < 0) return "bg-red-900/90 border-red-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
   return "bg-slate-800 border-slate-700";
 }
 
-function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | number }) {
+function StatCard({
+  icon,
+  label,
+  value,
+  subtext,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string | number;
+  subtext?: string;
+}) {
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-xl">
-      <div className="flex items-center gap-2 text-sm text-slate-400">{icon}{label}</div>
-      <div className="mt-2 text-2xl font-semibold">{value}</div>
+    <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl backdrop-blur">
+      <div className="flex items-center gap-2 text-sm text-slate-400">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-3 text-2xl font-semibold tracking-tight">{value}</div>
+      {subtext ? <div className="mt-1 text-xs text-slate-500">{subtext}</div> : null}
     </div>
   );
 }
 
-function MonthCalendar({ month, dailyMap }: { month: string; dailyMap: Map<string, DailyEntry> }) {
+function EmptyState() {
+  return (
+    <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-900/60 p-10 text-center shadow-xl">
+      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-800 text-slate-200">
+        <FileUp className="h-7 w-7" />
+      </div>
+      <h3 className="text-xl font-semibold">Upload a trading CSV</h3>
+      <p className="mx-auto mt-2 max-w-2xl text-sm text-slate-400">
+        Supports realized gain/loss and account-history style exports. Your file stays in your browser in this version.
+      </p>
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
+        <span className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar view</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">PNG export</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">Realized P/L support</span>
+      </div>
+    </div>
+  );
+}
+
+function MonthCalendar({
+  month,
+  dailyMap,
+}: {
+  month: string;
+  dailyMap: Map<string, DailyEntry>;
+}) {
   const [year, monthNum] = month.split("-").map(Number);
   const label = `${MONTH_NAMES[monthNum - 1]} ${year}`;
   const weeks = getBusinessCalendarWeeks(year, monthNum - 1);
@@ -175,31 +223,41 @@ function MonthCalendar({ month, dailyMap }: { month: string; dailyMap: Map<strin
   };
 
   return (
-    <div className="rounded-3xl border border-slate-800 bg-slate-950 p-5 shadow-2xl">
+    <section className="rounded-3xl border border-slate-800 bg-slate-950/90 p-5 shadow-2xl">
       <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">{label}</h2>
           <div className="mt-2 flex flex-wrap gap-2 text-sm">
-            <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">Total {formatCurrency(total)}</span>
-            <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">Win rate {winRate.toFixed(0)}%</span>
-            <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">Avg day {formatCurrency(avg)}</span>
+            <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">
+              Total {formatCurrency(total)}
+            </span>
+            <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">
+              Win rate {winRate.toFixed(0)}%
+            </span>
+            <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">
+              Avg day {formatCurrency(avg)}
+            </span>
           </div>
         </div>
         <button
           onClick={exportPng}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          className="inline-flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800"
         >
           <Download className="h-4 w-4" />
           Export PNG
         </button>
       </div>
 
-      <div id={`calendar-${month}`} className="rounded-2xl bg-slate-900 p-4">
+      <div id={`calendar-${month}`} className="rounded-3xl bg-slate-900 p-4">
         <div className="mb-2 grid grid-cols-[repeat(5,minmax(0,1fr))_120px] gap-2">
           {WEEKDAYS.map((day) => (
-            <div key={day} className="px-2 py-1 text-xs font-semibold tracking-[0.2em] text-slate-400">{day}</div>
+            <div key={day} className="px-2 py-1 text-xs font-semibold tracking-[0.22em] text-slate-400">
+              {day}
+            </div>
           ))}
-          <div className="px-2 py-1 text-right text-xs font-semibold tracking-[0.2em] text-slate-400">WEEK</div>
+          <div className="px-2 py-1 text-right text-xs font-semibold tracking-[0.22em] text-slate-400">
+            WEEK
+          </div>
         </div>
 
         <div className="space-y-2">
@@ -222,7 +280,7 @@ function MonthCalendar({ month, dailyMap }: { month: string; dailyMap: Map<strin
                     <div
                       key={key}
                       title={`${date.toDateString()} | ${formatCurrency(pl)} | ${trades} trades`}
-                      className={`min-h-[106px] rounded-xl border p-3 ${tileClasses(pl, !inMonth)}`}
+                      className={`min-h-[108px] rounded-2xl border p-3 transition-all hover:scale-[1.01] ${tileClasses(pl, !inMonth)}`}
                     >
                       <div className="text-xs font-medium text-slate-200">{date.getDate()}</div>
                       {inMonth && (
@@ -242,7 +300,7 @@ function MonthCalendar({ month, dailyMap }: { month: string; dailyMap: Map<strin
           })}
         </div>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -252,7 +310,20 @@ export default function Page() {
   const [error, setError] = useState("");
 
   const { dailyMap, months } = useMemo(() => buildDailyData(rows), [rows]);
-  const totalYtd = useMemo(() => [...dailyMap.values()].reduce((sum, d) => sum + d.pl, 0), [dailyMap]);
+  const entries = useMemo(() => [...dailyMap.values()], [dailyMap]);
+  const totalYtd = useMemo(() => entries.reduce((sum, d) => sum + d.pl, 0), [entries]);
+  const bestDay = useMemo(
+    () => entries.reduce((best, d) => (best == null || d.pl > best.pl ? d : best), null as DailyEntry | null),
+    [entries]
+  );
+  const worstDay = useMemo(
+    () => entries.reduce((worst, d) => (worst == null || d.pl < worst.pl ? d : worst), null as DailyEntry | null),
+    [entries]
+  );
+  const overallWinRate = useMemo(
+    () => (entries.length ? (entries.filter((d) => d.pl > 0).length / entries.length) * 100 : 0),
+    [entries]
+  );
 
   const onFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -281,48 +352,92 @@ export default function Page() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 px-6 py-8 text-white md:px-10">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(20,184,166,0.10),transparent_28%),linear-gradient(180deg,#020617_0%,#0f172a_100%)] px-6 py-8 text-white md:px-10">
       <div className="mx-auto max-w-7xl space-y-8">
-        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-          <div>
-            <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">Trading Calendar Dashboard</h1>
-            <p className="mt-2 max-w-2xl text-slate-400">
-              Upload a CSV and generate monthly trading calendar charts automatically.
-            </p>
-          </div>
-
-          <div className="w-full rounded-2xl border border-slate-800 bg-slate-900 p-4 md:w-[380px]">
-            <label className="mb-2 block text-sm font-medium text-slate-300">Upload CSV</label>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={onFileChange}
-              className="block w-full rounded-xl border border-slate-700 bg-slate-950 p-2 text-sm text-white"
-            />
-            <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
-              <Upload className="h-3.5 w-3.5" />
-              {fileName || "No file selected"}
+        <section className="overflow-hidden rounded-[32px] border border-slate-800 bg-slate-950/80 p-6 shadow-2xl backdrop-blur md:p-8">
+          <div className="grid gap-8 lg:grid-cols-[1.15fr_0.85fr] lg:items-center">
+            <div>
+              <div className="inline-flex items-center gap-2 rounded-full border border-teal-800/70 bg-teal-900/30 px-3 py-1 text-xs font-medium text-teal-200">
+                <Sparkles className="h-3.5 w-3.5" /> TradeCalendar
+              </div>
+              <h1 className="mt-4 text-4xl font-semibold tracking-tight md:text-5xl">
+                Turn your trading CSV into a clean monthly P/L calendar.
+              </h1>
+              <p className="mt-4 max-w-2xl text-base leading-7 text-slate-400">
+                Upload a realized gain/loss or account-history CSV and instantly generate polished trading calendar views, weekly totals, and high-level performance stats.
+              </p>
+              <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
+                <div className="rounded-full bg-slate-800 px-3 py-1">Client-side CSV parsing</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar exports</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">Works with common broker exports</div>
+              </div>
             </div>
-            {error && <div className="mt-2 text-sm text-red-400">{error}</div>}
-          </div>
-        </div>
 
-        <div className="grid gap-4 md:grid-cols-3">
-          <StatCard icon={<BarChart3 className="h-4 w-4" />} label="YTD P/L" value={formatCurrency(totalYtd)} />
-          <StatCard icon={<CalendarIcon className="h-4 w-4" />} label="Months" value={months.length} />
-          <StatCard icon={<Upload className="h-4 w-4" />} label="Parsed Days" value={dailyMap.size} />
-        </div>
+            <div className="rounded-3xl border border-slate-800 bg-slate-900/85 p-5 shadow-xl">
+              <label className="mb-2 block text-sm font-medium text-slate-300">Upload trading CSV</label>
+              <input
+                type="file"
+                accept=".csv"
+                onChange={onFileChange}
+                className="block w-full rounded-2xl border border-slate-700 bg-slate-950 p-3 text-sm text-white"
+              />
+              <div className="mt-4 flex items-center gap-2 text-sm text-slate-400">
+                <Upload className="h-4 w-4" />
+                <span>{fileName || "No file selected"}</span>
+              </div>
+              <p className="mt-3 text-xs leading-5 text-slate-500">
+                Files stay in your browser in this version. Nothing is uploaded to a backend server.
+              </p>
+              {error && (
+                <div className="mt-3 rounded-xl border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {error}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            icon={<BarChart3 className="h-4 w-4" />}
+            label="YTD P/L"
+            value={formatCurrency(totalYtd)}
+            subtext="Across all parsed trading days"
+          />
+          <StatCard
+            icon={<ShieldCheck className="h-4 w-4" />}
+            label="Overall Win Rate"
+            value={`${overallWinRate.toFixed(0)}%`}
+            subtext="Winning trading days"
+          />
+          <StatCard
+            icon={<TrendingUp className="h-4 w-4" />}
+            label="Best Day"
+            value={bestDay ? formatCurrency(bestDay.pl) : "$0"}
+            subtext={bestDay ? bestDay.date.toLocaleDateString() : "—"}
+          />
+          <StatCard
+            icon={<TrendingDown className="h-4 w-4" />}
+            label="Worst Day"
+            value={worstDay ? formatCurrency(worstDay.pl) : "$0"}
+            subtext={worstDay ? worstDay.date.toLocaleDateString() : "—"}
+          />
+        </section>
 
         {months.length === 0 ? (
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-10 text-center text-slate-400">
-            Upload your CSV to generate the monthly calendar charts.
-          </div>
+          <EmptyState />
         ) : (
-          <div className="space-y-6">
+          <section className="space-y-6">
+            <div>
+              <h2 className="text-2xl font-semibold tracking-tight">Monthly Performance</h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Review realized daily gains, losses, trade counts, and weekly totals by month.
+              </p>
+            </div>
             {months.map((month) => (
               <MonthCalendar key={month} month={month} dailyMap={dailyMap} />
             ))}
-          </div>
+          </section>
         )}
       </div>
     </main>
