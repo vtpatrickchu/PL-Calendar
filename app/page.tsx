@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import html2canvas from "html2canvas";
 import {
@@ -12,12 +12,24 @@ import {
   ShieldCheck,
   Sparkles,
   FileUp,
+  Activity,
 } from "lucide-react";
 
 const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
 ];
+
 const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI"];
 
 type PLMode = "tax" | "true";
@@ -29,8 +41,27 @@ type DailyEntry = {
   trades: number;
 };
 
+type PricePoint = {
+  date: string;
+  close: number;
+};
+
+type BenchmarkData = {
+  spy: PricePoint[];
+  qqq: PricePoint[];
+};
+
+type BenchmarkSummary = {
+  your: number;
+  spy: number;
+  qqq: number;
+  alphaSpy: number;
+  alphaQqq: number;
+};
+
 function parseMoney(value: unknown): number {
   if (value == null) return NaN;
+
   const raw = String(value).trim();
   if (raw === "" || raw === "--") return NaN;
 
@@ -44,9 +75,10 @@ function parseMoney(value: unknown): number {
 
 function parseDate(value: unknown): Date | null {
   if (!value) return null;
-  const str = String(value).trim();
 
+  const str = String(value).trim();
   const mmddyyyy = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+
   if (mmddyyyy) {
     const [, mm, dd, yyyy] = mmddyyyy;
     const d = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
@@ -65,8 +97,16 @@ function formatCurrency(value: number): string {
   }).format(value || 0);
 }
 
+function formatPercent(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
+}
+
 function monthKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function isoDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
 }
 
 function getBusinessCalendarWeeks(year: number, month: number): Date[][] {
@@ -184,7 +224,7 @@ function buildDailyData(rows: Record<string, unknown>[]) {
 
     const truePl = taxPl - disallowed;
 
-    const key = date.toISOString().slice(0, 10);
+    const key = isoDate(date);
     const current = dailyMap.get(key) || {
       date,
       taxPl: 0,
@@ -195,24 +235,77 @@ function buildDailyData(rows: Record<string, unknown>[]) {
     current.taxPl += taxPl;
     current.truePl += truePl;
     current.trades += 1;
+
     dailyMap.set(key, current);
   });
 
   const months = [...new Set([...dailyMap.values()].map((d) => monthKey(d.date)))].sort();
 
-  return { dailyMap, months, hasDisallowedLossColumn };
+  return {
+    dailyMap,
+    months,
+    hasDisallowedLossColumn,
+  };
 }
 
 function getActivePl(entry: DailyEntry, mode: PLMode): number {
   return mode === "tax" ? entry.taxPl : entry.truePl;
 }
 
+function buildCompactBenchmark(
+  entries: DailyEntry[],
+  plMode: PLMode,
+  spyPrices: PricePoint[],
+  qqqPrices: PricePoint[]
+): BenchmarkSummary | null {
+  if (!entries.length || !spyPrices.length || !qqqPrices.length) return null;
+
+  const spyMap = new Map(spyPrices.map((p) => [p.date, p.close]));
+  const qqqMap = new Map(qqqPrices.map((p) => [p.date, p.close]));
+
+  const filteredEntries = entries.filter((e) => {
+    const d = isoDate(e.date);
+    return spyMap.has(d) && qqqMap.has(d);
+  });
+
+  if (!filteredEntries.length) return null;
+
+  const startDate = isoDate(filteredEntries[0].date);
+  const endDate = isoDate(filteredEntries[filteredEntries.length - 1].date);
+
+  const spyStart = spyMap.get(startDate);
+  const qqqStart = qqqMap.get(startDate);
+  const spyEnd = spyMap.get(endDate);
+  const qqqEnd = qqqMap.get(endDate);
+
+  if (!spyStart || !qqqStart || !spyEnd || !qqqEnd) return null;
+
+  const startingCapital = 100;
+  let yourEquity = startingCapital;
+
+  for (const entry of filteredEntries) {
+    yourEquity += getActivePl(entry, plMode);
+  }
+
+  const yourReturn = ((yourEquity / startingCapital) - 1) * 100;
+  const spyReturn = ((spyEnd / spyStart) - 1) * 100;
+  const qqqReturn = ((qqqEnd / qqqStart) - 1) * 100;
+
+  return {
+    your: yourReturn,
+    spy: spyReturn,
+    qqq: qqqReturn,
+    alphaSpy: yourReturn - spyReturn,
+    alphaQqq: yourReturn - qqqReturn,
+  };
+}
+
 function tileClasses(value: number, muted: boolean) {
   if (muted) return "bg-slate-900/30 border-slate-800 text-slate-600";
-  if (value > 10000) return "bg-emerald-900/90 border-emerald-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
-  if (value > 0) return "bg-teal-800/90 border-teal-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
-  if (value < -10000) return "bg-red-950 border-red-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
-  if (value < 0) return "bg-red-900/90 border-red-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
+  if (value > 10000) return "bg-emerald-900/90 border-emerald-700";
+  if (value > 0) return "bg-teal-800/90 border-teal-700";
+  if (value < -10000) return "bg-red-950 border-red-800";
+  if (value < 0) return "bg-red-900/90 border-red-700";
   return "bg-slate-800 border-slate-700";
 }
 
@@ -252,7 +345,8 @@ function EmptyState() {
       <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
         <span className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar view</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">PNG export</span>
-        <span className="rounded-full bg-slate-800 px-3 py-1">Tax vs true P/L</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">Tax + true P/L</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</span>
       </div>
     </div>
   );
@@ -280,7 +374,12 @@ function MonthCalendar({
   const exportPng = async () => {
     const node = document.getElementById(`calendar-${month}`);
     if (!node) return;
-    const canvas = await html2canvas(node, { backgroundColor: "#0f172a", scale: 2 });
+
+    const canvas = await html2canvas(node, {
+      backgroundColor: "#0f172a",
+      scale: 2,
+    });
+
     const link = document.createElement("a");
     link.download = `${month}-trading-calendar.png`;
     link.href = canvas.toDataURL("image/png");
@@ -304,6 +403,7 @@ function MonthCalendar({
             </span>
           </div>
         </div>
+
         <button
           onClick={exportPng}
           className="inline-flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800"
@@ -316,7 +416,10 @@ function MonthCalendar({
       <div id={`calendar-${month}`} className="rounded-3xl bg-slate-900 p-4">
         <div className="mb-2 grid grid-cols-[repeat(5,minmax(0,1fr))_120px] gap-2">
           {WEEKDAYS.map((day) => (
-            <div key={day} className="px-2 py-1 text-xs font-semibold tracking-[0.22em] text-slate-400">
+            <div
+              key={day}
+              className="px-2 py-1 text-xs font-semibold tracking-[0.22em] text-slate-400"
+            >
               {day}
             </div>
           ))}
@@ -328,7 +431,7 @@ function MonthCalendar({
         <div className="space-y-2">
           {weeks.map((week, idx) => {
             const weekTotal = week.reduce((sum, date) => {
-              const key = date.toISOString().slice(0, 10);
+              const key = isoDate(date);
               const entry = dailyMap.get(key);
               return sum + (entry ? getActivePl(entry, plMode) : 0);
             }, 0);
@@ -337,7 +440,7 @@ function MonthCalendar({
               <div key={idx} className="grid grid-cols-[repeat(5,minmax(0,1fr))_120px] gap-2">
                 {week.map((date) => {
                   const inMonth = date.getMonth() === monthNum - 1;
-                  const key = date.toISOString().slice(0, 10);
+                  const key = isoDate(date);
                   const entry = dailyMap.get(key);
                   const pl = entry ? getActivePl(entry, plMode) : 0;
                   const trades = entry?.trades ?? 0;
@@ -351,13 +454,16 @@ function MonthCalendar({
                       <div className="text-xs font-medium text-slate-200">{date.getDate()}</div>
                       {inMonth && (
                         <div className="mt-3 space-y-1">
-                          <div className="text-sm font-semibold leading-tight">{formatCurrency(pl)}</div>
+                          <div className="text-sm font-semibold leading-tight">
+                            {formatCurrency(pl)}
+                          </div>
                           <div className="text-xs text-slate-200/85">{trades} trades</div>
                         </div>
                       )}
                     </div>
                   );
                 })}
+
                 <div className="flex items-center justify-end pr-2 text-sm font-semibold text-slate-300">
                   {formatCurrency(weekTotal)}
                 </div>
@@ -375,9 +481,66 @@ export default function Page() {
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const [plMode, setPlMode] = useState<PLMode>("tax");
+  const [benchmarkData, setBenchmarkData] = useState<BenchmarkData | null>(null);
+  const [benchmarkError, setBenchmarkError] = useState("");
 
-  const { dailyMap, months, hasDisallowedLossColumn } = useMemo(() => buildDailyData(rows), [rows]);
-  const entries = useMemo(() => [...dailyMap.values()], [dailyMap]);
+  const { dailyMap, months, hasDisallowedLossColumn } = useMemo(
+    () => buildDailyData(rows),
+    [rows]
+  );
+
+  const entries = useMemo(
+    () => [...dailyMap.values()].sort((a, b) => a.date.getTime() - b.date.getTime()),
+    [dailyMap]
+  );
+
+  useEffect(() => {
+    if (!entries.length) {
+      setBenchmarkData(null);
+      setBenchmarkError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadBenchmarks() {
+      try {
+        setBenchmarkError("");
+
+        const res = await fetch("/api/benchmarks");
+        if (!res.ok) {
+          throw new Error("Benchmark request failed");
+        }
+
+        const data = await res.json();
+
+        if (!cancelled) {
+          setBenchmarkData(data);
+        }
+      } catch {
+        if (!cancelled) {
+          setBenchmarkError("Could not load SPY / QQQ benchmark data.");
+        }
+      }
+    }
+
+    loadBenchmarks();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [entries]);
+
+  const benchmark = useMemo(() => {
+    if (!benchmarkData) return null;
+
+    return buildCompactBenchmark(
+      entries,
+      plMode,
+      benchmarkData.spy,
+      benchmarkData.qqq
+    );
+  }, [entries, plMode, benchmarkData]);
 
   const totalYtd = useMemo(
     () => entries.reduce((sum, d) => sum + getActivePl(d, plMode), 0),
@@ -387,7 +550,10 @@ export default function Page() {
   const bestDay = useMemo(
     () =>
       entries.reduce(
-        (best, d) => (best == null || getActivePl(d, plMode) > getActivePl(best, plMode) ? d : best),
+        (best, d) =>
+          best == null || getActivePl(d, plMode) > getActivePl(best, plMode)
+            ? d
+            : best,
         null as DailyEntry | null
       ),
     [entries, plMode]
@@ -396,7 +562,10 @@ export default function Page() {
   const worstDay = useMemo(
     () =>
       entries.reduce(
-        (worst, d) => (worst == null || getActivePl(d, plMode) < getActivePl(worst, plMode) ? d : worst),
+        (worst, d) =>
+          worst == null || getActivePl(d, plMode) < getActivePl(worst, plMode)
+            ? d
+            : worst,
         null as DailyEntry | null
       ),
     [entries, plMode]
@@ -422,11 +591,13 @@ export default function Page() {
       skipEmptyLines: true,
       complete: (results) => {
         const parsedRows = results.data || [];
+
         if (!parsedRows.length) {
           setRows([]);
           setError("Could not read any rows from that CSV.");
           return;
         }
+
         setRows(parsedRows);
       },
       error: () => {
@@ -452,18 +623,24 @@ export default function Page() {
               </h1>
 
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-400">
-                Upload a realized gain/loss or account-history CSV and instantly generate polished trading calendar views, weekly totals, and high-level performance stats.
+                Upload a realized gain/loss or account-history CSV and instantly generate
+                polished trading calendar views, weekly totals, high-level performance
+                stats, and a compact SPY / QQQ benchmark.
               </p>
 
               <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
                 <div className="rounded-full bg-slate-800 px-3 py-1">Client-side CSV parsing</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar exports</div>
-                <div className="rounded-full bg-slate-800 px-3 py-1">Tax + true P/L modes</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">Tax + true P/L</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</div>
               </div>
             </div>
 
             <div className="rounded-3xl border border-slate-800 bg-slate-900/85 p-5 shadow-xl">
-              <label className="mb-2 block text-sm font-medium text-slate-300">Upload trading CSV</label>
+              <label className="mb-2 block text-sm font-medium text-slate-300">
+                Upload trading CSV
+              </label>
+
               <input
                 type="file"
                 accept=".csv"
@@ -500,12 +677,14 @@ export default function Page() {
               </div>
 
               <p className="mt-3 text-xs leading-5 text-slate-500">
-                Tax P/L matches broker/1099 reporting. True P/L backs out disallowed losses when present.
+                Tax P/L matches broker / 1099 reporting. True P/L backs out disallowed
+                losses when present.
               </p>
 
               {!hasDisallowedLossColumn && rows.length > 0 && (
                 <div className="mt-3 rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-                  This CSV does not appear to include a disallowed-loss or wash-sale column, so both modes may show the same values.
+                  This CSV does not appear to include a disallowed-loss or wash-sale
+                  column, so Tax P/L and True P/L may match.
                 </div>
               )}
 
@@ -544,6 +723,55 @@ export default function Page() {
             subtext={worstDay ? worstDay.date.toLocaleDateString() : "—"}
           />
         </section>
+
+        {benchmark && (
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/80 px-4 py-3 shadow-lg">
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <span className="inline-flex items-center gap-2 text-xs font-semibold tracking-wide text-slate-400">
+                <Activity className="h-3.5 w-3.5" />
+                Benchmark
+              </span>
+
+              <span className="rounded-lg bg-teal-900/60 px-3 py-1 font-semibold text-teal-300">
+                You {formatPercent(benchmark.your)}
+              </span>
+
+              <span className="rounded-lg bg-slate-800 px-3 py-1 text-slate-300">
+                SPY {formatPercent(benchmark.spy)}
+              </span>
+
+              <span className="rounded-lg bg-purple-900/40 px-3 py-1 text-purple-300">
+                QQQ {formatPercent(benchmark.qqq)}
+              </span>
+
+              <span className="text-slate-500">|</span>
+
+              <span className="text-xs text-slate-400">α vs SPY</span>
+              <span
+                className={`text-sm font-semibold ${
+                  benchmark.alphaSpy >= 0 ? "text-teal-400" : "text-red-400"
+                }`}
+              >
+                {formatPercent(benchmark.alphaSpy)}
+              </span>
+
+              <span className="text-xs text-slate-400">vs QQQ</span>
+              <span
+                className={`text-sm font-semibold ${
+                  benchmark.alphaQqq >= 0 ? "text-teal-400" : "text-red-400"
+                }`}
+              >
+                {formatPercent(benchmark.alphaQqq)}
+              </span>
+            </div>
+          </section>
+        )}
+
+        {benchmarkError && (
+          <div className="rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+            {benchmarkError}
+          </div>
+        )}
 
         {months.length === 0 ? (
           <EmptyState />
