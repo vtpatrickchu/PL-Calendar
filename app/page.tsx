@@ -5,7 +5,6 @@ import Papa from "papaparse";
 import html2canvas from "html2canvas";
 import {
   Upload,
-  Calendar as CalendarIcon,
   BarChart3,
   Download,
   TrendingUp,
@@ -17,15 +16,28 @@ import {
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December"
+  "July", "August", "September", "October", "November", "December",
 ];
 const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI"];
+
+type PLMode = "tax" | "true";
+
+type DailyEntry = {
+  date: Date;
+  taxPl: number;
+  truePl: number;
+  trades: number;
+};
 
 function parseMoney(value: unknown): number {
   if (value == null) return NaN;
   const raw = String(value).trim();
   if (raw === "" || raw === "--") return NaN;
-  const cleaned = raw.replace(/[$,\s]/g, "").replace(/^\((.*)\)$/, "-$1");
+
+  const cleaned = raw
+    .replace(/[$,\s]/g, "")
+    .replace(/^\((.*)\)$/, "-$1");
+
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : NaN;
 }
@@ -33,12 +45,14 @@ function parseMoney(value: unknown): number {
 function parseDate(value: unknown): Date | null {
   if (!value) return null;
   const str = String(value).trim();
+
   const mmddyyyy = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (mmddyyyy) {
     const [, mm, dd, yyyy] = mmddyyyy;
     const d = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
     return Number.isNaN(d.getTime()) ? null : d;
   }
+
   const d = new Date(str);
   return Number.isNaN(d.getTime()) ? null : d;
 }
@@ -83,8 +97,6 @@ function getBusinessCalendarWeeks(year: number, month: number): Date[][] {
   return weeks;
 }
 
-type DailyEntry = { date: Date; pl: number; trades: number };
-
 function inferHeaders(rows: Record<string, unknown>[]) {
   const headers = Object.keys(rows[0] || {});
   const lowerMap = new Map(headers.map((h) => [h.toLowerCase().trim(), h]));
@@ -102,46 +114,97 @@ function inferHeaders(rows: Record<string, unknown>[]) {
     lowerMap.get("amount");
 
   const proceedsHeader = lowerMap.get("proceeds");
-  const costHeader = lowerMap.get("cost") || lowerMap.get("basis");
+  const costHeader =
+    lowerMap.get("cost") ||
+    lowerMap.get("cost basis") ||
+    lowerMap.get("basis");
 
-  return { dateHeader, gainHeader, proceedsHeader, costHeader };
+  const disallowedHeader =
+    lowerMap.get("disallowed loss") ||
+    lowerMap.get("wash sale adjustment");
+
+  return {
+    dateHeader,
+    gainHeader,
+    proceedsHeader,
+    costHeader,
+    disallowedHeader,
+  };
 }
 
 function buildDailyData(rows: Record<string, unknown>[]) {
-  if (!rows.length) return { dailyMap: new Map<string, DailyEntry>(), months: [] as string[] };
+  if (!rows.length) {
+    return {
+      dailyMap: new Map<string, DailyEntry>(),
+      months: [] as string[],
+      hasDisallowedLossColumn: false,
+    };
+  }
 
-  const { dateHeader, gainHeader, proceedsHeader, costHeader } = inferHeaders(rows);
+  const {
+    dateHeader,
+    gainHeader,
+    proceedsHeader,
+    costHeader,
+    disallowedHeader,
+  } = inferHeaders(rows);
+
   const dailyMap = new Map<string, DailyEntry>();
+  let hasDisallowedLossColumn = false;
 
   rows.forEach((row) => {
     const date = parseDate(dateHeader ? row[dateHeader] : null);
     if (!date) return;
+
     const day = date.getDay();
     if (day === 0 || day === 6) return;
 
-    let pl = NaN;
+    let taxPl = NaN;
 
     if (gainHeader) {
-      pl = parseMoney(row[gainHeader]);
+      taxPl = parseMoney(row[gainHeader]);
     }
 
-    if (Number.isNaN(pl) && proceedsHeader && costHeader) {
+    if (Number.isNaN(taxPl) && proceedsHeader && costHeader) {
       const proceeds = parseMoney(row[proceedsHeader]);
       const cost = parseMoney(row[costHeader]);
-      if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) pl = proceeds - cost;
+      if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) {
+        taxPl = proceeds - cost;
+      }
     }
 
-    if (Number.isNaN(pl)) return;
+    if (Number.isNaN(taxPl)) return;
+
+    const rawDisallowed = disallowedHeader ? parseMoney(row[disallowedHeader]) : 0;
+    const disallowed = Number.isNaN(rawDisallowed) ? 0 : rawDisallowed;
+
+    if (disallowedHeader) {
+      hasDisallowedLossColumn = true;
+    }
+
+    const truePl = taxPl - disallowed;
 
     const key = date.toISOString().slice(0, 10);
-    const current = dailyMap.get(key) || { date, pl: 0, trades: 0 };
-    current.pl += pl;
+    const current = dailyMap.get(key) || {
+      date,
+      taxPl: 0,
+      truePl: 0,
+      trades: 0,
+    };
+
+    current.taxPl += taxPl;
+    current.truePl += truePl;
     current.trades += 1;
     dailyMap.set(key, current);
   });
 
   const months = [...new Set([...dailyMap.values()].map((d) => monthKey(d.date)))].sort();
-  return { dailyMap, months };
+
+  return { dailyMap, months, hasDisallowedLossColumn };
+}
+
+function getActivePl(entry: DailyEntry, mode: PLMode): number {
+  return mode === "tax" ? entry.taxPl : entry.truePl;
 }
 
 function tileClasses(value: number, muted: boolean) {
@@ -189,7 +252,7 @@ function EmptyState() {
       <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
         <span className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar view</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">PNG export</span>
-        <span className="rounded-full bg-slate-800 px-3 py-1">Realized P/L support</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">Tax vs true P/L</span>
       </div>
     </div>
   );
@@ -198,17 +261,19 @@ function EmptyState() {
 function MonthCalendar({
   month,
   dailyMap,
+  plMode,
 }: {
   month: string;
   dailyMap: Map<string, DailyEntry>;
+  plMode: PLMode;
 }) {
   const [year, monthNum] = month.split("-").map(Number);
   const label = `${MONTH_NAMES[monthNum - 1]} ${year}`;
   const weeks = getBusinessCalendarWeeks(year, monthNum - 1);
 
   const monthEntries = [...dailyMap.values()].filter((d) => monthKey(d.date) === month);
-  const total = monthEntries.reduce((sum, d) => sum + d.pl, 0);
-  const wins = monthEntries.filter((d) => d.pl > 0).length;
+  const total = monthEntries.reduce((sum, d) => sum + getActivePl(d, plMode), 0);
+  const wins = monthEntries.filter((d) => getActivePl(d, plMode) > 0).length;
   const winRate = monthEntries.length ? (wins / monthEntries.length) * 100 : 0;
   const avg = monthEntries.length ? total / monthEntries.length : 0;
 
@@ -264,7 +329,8 @@ function MonthCalendar({
           {weeks.map((week, idx) => {
             const weekTotal = week.reduce((sum, date) => {
               const key = date.toISOString().slice(0, 10);
-              return sum + (dailyMap.get(key)?.pl || 0);
+              const entry = dailyMap.get(key);
+              return sum + (entry ? getActivePl(entry, plMode) : 0);
             }, 0);
 
             return (
@@ -273,7 +339,7 @@ function MonthCalendar({
                   const inMonth = date.getMonth() === monthNum - 1;
                   const key = date.toISOString().slice(0, 10);
                   const entry = dailyMap.get(key);
-                  const pl = entry?.pl ?? 0;
+                  const pl = entry ? getActivePl(entry, plMode) : 0;
                   const trades = entry?.trades ?? 0;
 
                   return (
@@ -308,21 +374,40 @@ export default function Page() {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
+  const [plMode, setPlMode] = useState<PLMode>("tax");
 
-  const { dailyMap, months } = useMemo(() => buildDailyData(rows), [rows]);
+  const { dailyMap, months, hasDisallowedLossColumn } = useMemo(() => buildDailyData(rows), [rows]);
   const entries = useMemo(() => [...dailyMap.values()], [dailyMap]);
-  const totalYtd = useMemo(() => entries.reduce((sum, d) => sum + d.pl, 0), [entries]);
+
+  const totalYtd = useMemo(
+    () => entries.reduce((sum, d) => sum + getActivePl(d, plMode), 0),
+    [entries, plMode]
+  );
+
   const bestDay = useMemo(
-    () => entries.reduce((best, d) => (best == null || d.pl > best.pl ? d : best), null as DailyEntry | null),
-    [entries]
+    () =>
+      entries.reduce(
+        (best, d) => (best == null || getActivePl(d, plMode) > getActivePl(best, plMode) ? d : best),
+        null as DailyEntry | null
+      ),
+    [entries, plMode]
   );
+
   const worstDay = useMemo(
-    () => entries.reduce((worst, d) => (worst == null || d.pl < worst.pl ? d : worst), null as DailyEntry | null),
-    [entries]
+    () =>
+      entries.reduce(
+        (worst, d) => (worst == null || getActivePl(d, plMode) < getActivePl(worst, plMode) ? d : worst),
+        null as DailyEntry | null
+      ),
+    [entries, plMode]
   );
+
   const overallWinRate = useMemo(
-    () => (entries.length ? (entries.filter((d) => d.pl > 0).length / entries.length) * 100 : 0),
-    [entries]
+    () =>
+      entries.length
+        ? (entries.filter((d) => getActivePl(d, plMode) > 0).length / entries.length) * 100
+        : 0,
+    [entries, plMode]
   );
 
   const onFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -358,18 +443,22 @@ export default function Page() {
           <div className="grid gap-8 lg:grid-cols-[1.15fr_0.85fr] lg:items-center">
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-teal-800/70 bg-teal-900/30 px-3 py-1 text-xs font-medium text-teal-200">
-                <Sparkles className="h-3.5 w-3.5" /> TradeCalendar
+                <Sparkles className="h-3.5 w-3.5" />
+                TradeCalendar
               </div>
+
               <h1 className="mt-4 text-4xl font-semibold tracking-tight md:text-5xl">
                 Turn your trading CSV into a clean monthly P/L calendar.
               </h1>
+
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-400">
                 Upload a realized gain/loss or account-history CSV and instantly generate polished trading calendar views, weekly totals, and high-level performance stats.
               </p>
+
               <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
                 <div className="rounded-full bg-slate-800 px-3 py-1">Client-side CSV parsing</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar exports</div>
-                <div className="rounded-full bg-slate-800 px-3 py-1">Works with common broker exports</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">Tax + true P/L modes</div>
               </div>
             </div>
 
@@ -381,13 +470,45 @@ export default function Page() {
                 onChange={onFileChange}
                 className="block w-full rounded-2xl border border-slate-700 bg-slate-950 p-3 text-sm text-white"
               />
+
               <div className="mt-4 flex items-center gap-2 text-sm text-slate-400">
                 <Upload className="h-4 w-4" />
                 <span>{fileName || "No file selected"}</span>
               </div>
+
+              <div className="mt-4 inline-flex rounded-2xl border border-slate-700 bg-slate-950 p-1">
+                <button
+                  onClick={() => setPlMode("tax")}
+                  className={`rounded-xl px-4 py-2 text-sm ${
+                    plMode === "tax"
+                      ? "bg-teal-700 text-white"
+                      : "text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  Tax P/L
+                </button>
+                <button
+                  onClick={() => setPlMode("true")}
+                  className={`rounded-xl px-4 py-2 text-sm ${
+                    plMode === "true"
+                      ? "bg-teal-700 text-white"
+                      : "text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  True P/L
+                </button>
+              </div>
+
               <p className="mt-3 text-xs leading-5 text-slate-500">
-                Files stay in your browser in this version. Nothing is uploaded to a backend server.
+                Tax P/L matches broker/1099 reporting. True P/L backs out disallowed losses when present.
               </p>
+
+              {!hasDisallowedLossColumn && rows.length > 0 && (
+                <div className="mt-3 rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                  This CSV does not appear to include a disallowed-loss or wash-sale column, so both modes may show the same values.
+                </div>
+              )}
+
               {error && (
                 <div className="mt-3 rounded-xl border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">
                   {error}
@@ -400,7 +521,7 @@ export default function Page() {
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <StatCard
             icon={<BarChart3 className="h-4 w-4" />}
-            label="YTD P/L"
+            label={plMode === "tax" ? "YTD Tax P/L" : "YTD True P/L"}
             value={formatCurrency(totalYtd)}
             subtext="Across all parsed trading days"
           />
@@ -413,13 +534,13 @@ export default function Page() {
           <StatCard
             icon={<TrendingUp className="h-4 w-4" />}
             label="Best Day"
-            value={bestDay ? formatCurrency(bestDay.pl) : "$0"}
+            value={bestDay ? formatCurrency(getActivePl(bestDay, plMode)) : "$0"}
             subtext={bestDay ? bestDay.date.toLocaleDateString() : "—"}
           />
           <StatCard
             icon={<TrendingDown className="h-4 w-4" />}
             label="Worst Day"
-            value={worstDay ? formatCurrency(worstDay.pl) : "$0"}
+            value={worstDay ? formatCurrency(getActivePl(worstDay, plMode)) : "$0"}
             subtext={worstDay ? worstDay.date.toLocaleDateString() : "—"}
           />
         </section>
@@ -431,11 +552,17 @@ export default function Page() {
             <div>
               <h2 className="text-2xl font-semibold tracking-tight">Monthly Performance</h2>
               <p className="mt-1 text-sm text-slate-400">
-                Review realized daily gains, losses, trade counts, and weekly totals by month.
+                Review daily gains, losses, trade counts, and weekly totals by month.
               </p>
             </div>
+
             {months.map((month) => (
-              <MonthCalendar key={month} month={month} dailyMap={dailyMap} />
+              <MonthCalendar
+                key={month}
+                month={month}
+                dailyMap={dailyMap}
+                plMode={plMode}
+              />
             ))}
           </section>
         )}
