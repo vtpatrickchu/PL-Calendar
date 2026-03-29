@@ -144,31 +144,55 @@ function inferHeaders(rows: Record<string, unknown>[]) {
 
   const dateHeader =
     lowerMap.get("date sold") ||
+    lowerMap.get("settlement date") ||
     lowerMap.get("run date") ||
+    lowerMap.get("trade date") ||
     lowerMap.get("date");
 
   const gainHeader =
     lowerMap.get("gain") ||
     lowerMap.get("short term gain/loss") ||
-    lowerMap.get("st") ||
+    lowerMap.get("short-term gain/loss") ||
+    lowerMap.get("realized gain/loss") ||
     lowerMap.get("realized") ||
-    lowerMap.get("amount");
+    lowerMap.get("p/l") ||
+    lowerMap.get("profit/loss");
 
-  const proceedsHeader = lowerMap.get("proceeds");
+  const proceedsHeader =
+    lowerMap.get("proceeds") ||
+    lowerMap.get("amount") ||
+    lowerMap.get("amount ($)");
+
   const costHeader =
     lowerMap.get("cost") ||
     lowerMap.get("cost basis") ||
+    lowerMap.get("total cost basis") ||
     lowerMap.get("basis");
+
+  const feeHeader =
+    lowerMap.get("transaction cost") ||
+    lowerMap.get("commission") ||
+    lowerMap.get("commission ($)") ||
+    lowerMap.get("fees") ||
+    lowerMap.get("fees ($)") ||
+    lowerMap.get("fee");
+
+  const actionHeader =
+    lowerMap.get("action") ||
+    lowerMap.get("type");
 
   const disallowedHeader =
     lowerMap.get("disallowed loss") ||
     lowerMap.get("wash sale adjustment");
 
   return {
+    headers,
     dateHeader,
     gainHeader,
     proceedsHeader,
     costHeader,
+    feeHeader,
+    actionHeader,
     disallowedHeader,
   };
 }
@@ -179,6 +203,7 @@ function buildDailyData(rows: Record<string, unknown>[]) {
       dailyMap: new Map<string, DailyEntry>(),
       months: [] as string[],
       hasDisallowedLossColumn: false,
+      parseError: "",
     };
   }
 
@@ -187,8 +212,48 @@ function buildDailyData(rows: Record<string, unknown>[]) {
     gainHeader,
     proceedsHeader,
     costHeader,
+    feeHeader,
+    actionHeader,
     disallowedHeader,
   } = inferHeaders(rows);
+
+  const hasDirectGainColumn = Boolean(gainHeader);
+  const hasFallbackPLColumns = Boolean(proceedsHeader && costHeader);
+  const looksLikeActivityExport =
+    Boolean(actionHeader) &&
+    Boolean(proceedsHeader) &&
+    !gainHeader &&
+    !costHeader;
+
+  if (!dateHeader) {
+    return {
+      dailyMap: new Map<string, DailyEntry>(),
+      months: [] as string[],
+      hasDisallowedLossColumn: false,
+      parseError:
+        "We couldn't find a supported date column in this CSV. Try a realized gain/loss export, or upload a different format.",
+    };
+  }
+
+  if (looksLikeActivityExport) {
+    return {
+      dailyMap: new Map<string, DailyEntry>(),
+      months: [] as string[],
+      hasDisallowedLossColumn: false,
+      parseError:
+        "This CSV looks like an account activity export, not a realized gain/loss export. Try uploading a realized gain/loss CSV for accurate daily P/L results.",
+    };
+  }
+
+  if (!hasDirectGainColumn && !hasFallbackPLColumns) {
+    return {
+      dailyMap: new Map<string, DailyEntry>(),
+      months: [] as string[],
+      hasDisallowedLossColumn: false,
+      parseError:
+        "We couldn't find a supported gain/loss column in this CSV. Try a realized gain/loss export, or upload a different format.",
+    };
+  }
 
   const dailyMap = new Map<string, DailyEntry>();
   let hasDisallowedLossColumn = false;
@@ -209,8 +274,10 @@ function buildDailyData(rows: Record<string, unknown>[]) {
     if (Number.isNaN(taxPl) && proceedsHeader && costHeader) {
       const proceeds = parseMoney(row[proceedsHeader]);
       const cost = parseMoney(row[costHeader]);
+      const fee = feeHeader ? parseMoney(row[feeHeader]) : 0;
+
       if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) {
-        taxPl = proceeds - cost;
+        taxPl = proceeds - cost - (Number.isNaN(fee) ? 0 : fee);
       }
     }
 
@@ -242,10 +309,21 @@ function buildDailyData(rows: Record<string, unknown>[]) {
 
   const months = [...new Set([...dailyMap.values()].map((d) => monthKey(d.date)))].sort();
 
+  if (!dailyMap.size) {
+    return {
+      dailyMap,
+      months,
+      hasDisallowedLossColumn,
+      parseError:
+        "We couldn't read any valid trading rows from this CSV. Try a realized gain/loss export, or upload a different format.",
+    };
+  }
+
   return {
     dailyMap,
     months,
     hasDisallowedLossColumn,
+    parseError: "",
   };
 }
 
@@ -487,7 +565,7 @@ export default function Page() {
   const [benchmarkError, setBenchmarkError] = useState("");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
 
-  const { dailyMap, months, hasDisallowedLossColumn } = useMemo(
+  const { dailyMap, months, hasDisallowedLossColumn, parseError } = useMemo(
     () => buildDailyData(rows),
     [rows]
   );
@@ -690,10 +768,16 @@ export default function Page() {
                 losses when present.
               </p>
 
-              {!hasDisallowedLossColumn && rows.length > 0 && (
+              {!hasDisallowedLossColumn && rows.length > 0 && !parseError && (
                 <div className="mt-3 rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
                   This CSV does not appear to include a disallowed-loss or wash-sale
                   column, so Tax P/L and True P/L may match.
+                </div>
+              )}
+
+              {parseError && (
+                <div className="mt-3 rounded-xl border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {parseError}
                 </div>
               )}
 
@@ -733,7 +817,7 @@ export default function Page() {
           />
         </section>
 
-        {(benchmarkLoading || benchmark || benchmarkError) && (
+        {(benchmarkLoading || benchmark || benchmarkError) && !parseError && (
           <section className="rounded-2xl border border-slate-800 bg-slate-900/80 px-4 py-3 shadow-lg">
             <div className="flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
