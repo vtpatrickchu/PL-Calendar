@@ -778,7 +778,7 @@ export default function Page() {
   const [benchmarkData, setBenchmarkData] = useState<BenchmarkData | null>(null);
   const [benchmarkError, setBenchmarkError] = useState("");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
-
+  const [showTickerBreakdown, setShowTickerBreakdown] = useState(true);
   const {
     dailyMap,
     tickerMap,
