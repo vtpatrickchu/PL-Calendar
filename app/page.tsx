@@ -15,6 +15,7 @@ import {
   Activity,
   Table2,
   FileSearch,
+  Hash,
 } from "lucide-react";
 
 const MONTH_NAMES = [
@@ -387,7 +388,6 @@ function buildDailyData(
           taxPl = truePl + rawDisallowed;
         }
       } else if (!Number.isNaN(directGain)) {
-        // Fidelity realized-G/L type file: live reconstruction not trustworthy
         taxPl = directGain;
         truePl = directGain;
         liveModeLimited = true;
@@ -603,7 +603,7 @@ function EmptyState() {
       <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
         <span className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar view</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">PNG export</span>
-        <span className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">Trade counts by week/month/YTD</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</span>
       </div>
     </div>
@@ -685,6 +685,7 @@ function MonthCalendar({
 
   const monthEntries = [...dailyMap.values()].filter((d) => monthKey(d.date) === month);
   const total = monthEntries.reduce((sum, d) => sum + getActivePl(d, plMode), 0);
+  const monthTrades = monthEntries.reduce((sum, d) => sum + d.trades, 0);
   const wins = monthEntries.filter((d) => getActivePl(d, plMode) > 0).length;
   const winRate = monthEntries.length ? (wins / monthEntries.length) * 100 : 0;
   const avg = monthEntries.length ? total / monthEntries.length : 0;
@@ -712,6 +713,9 @@ function MonthCalendar({
           <div className="mt-2 flex flex-wrap gap-2 text-sm">
             <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">
               Total {formatCurrency(total)}
+            </span>
+            <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">
+              Trades {monthTrades}
             </span>
             <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-100">
               Win rate {winRate.toFixed(0)}%
@@ -754,6 +758,12 @@ function MonthCalendar({
               return sum + (entry ? getActivePl(entry, plMode) : 0);
             }, 0);
 
+            const weekTrades = week.reduce((sum, date) => {
+              const key = isoDate(date);
+              const entry = dailyMap.get(key);
+              return sum + (entry ? entry.trades : 0);
+            }, 0);
+
             return (
               <div key={idx} className="grid grid-cols-[repeat(5,minmax(0,1fr))_120px] gap-2">
                 {week.map((date) => {
@@ -782,8 +792,9 @@ function MonthCalendar({
                   );
                 })}
 
-                <div className="flex items-center justify-end pr-2 text-sm font-semibold text-slate-300">
-                  {formatCurrency(weekTotal)}
+                <div className="flex flex-col items-end justify-center pr-2 text-sm font-semibold text-slate-300">
+                  <span>{formatCurrency(weekTotal)}</span>
+                  <span className="text-xs font-normal text-slate-500">{weekTrades} trades</span>
                 </div>
               </div>
             );
@@ -830,6 +841,11 @@ export default function Page() {
         (a, b) => getActivePl(b, plMode) - getActivePl(a, plMode)
       ),
     [tickerMap, plMode]
+  );
+
+  const totalTradesYtd = useMemo(
+    () => entries.reduce((sum, d) => sum + d.trades, 0),
+    [entries]
   );
 
   useEffect(() => {
@@ -953,13 +969,13 @@ export default function Page() {
 
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-400">
                 Upload a realized gain/loss or account-history CSV and instantly generate
-                polished trading calendar views, weekly totals, high-level performance
+                polished trading calendar views, weekly totals, trade counts, high-level performance
                 stats, and a compact SPY / QQQ benchmark.
               </p>
 
               <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
                 <div className="rounded-full bg-slate-800 px-3 py-1">Client-side CSV parsing</div>
-                <div className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar exports</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">Weekly/monthly/YTD trade counts</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</div>
               </div>
@@ -1092,7 +1108,7 @@ export default function Page() {
           </div>
         </section>
 
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <StatCard
             icon={<BarChart3 className="h-4 w-4" />}
             label={
@@ -1106,6 +1122,12 @@ export default function Page() {
             }
             value={formatCurrency(totalYtd)}
             subtext="Across all parsed trading days"
+          />
+          <StatCard
+            icon={<Hash className="h-4 w-4" />}
+            label="YTD Trades"
+            value={totalTradesYtd}
+            subtext="Total parsed trades this year"
           />
           <StatCard
             icon={<ShieldCheck className="h-4 w-4" />}
