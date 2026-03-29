@@ -13,6 +13,8 @@ import {
   Sparkles,
   FileUp,
   Activity,
+  Table2,
+  FileSearch,
 } from "lucide-react";
 
 const MONTH_NAMES = [
@@ -42,6 +44,15 @@ type DailyEntry = {
   trades: number;
 };
 
+type TickerEntry = {
+  symbol: string;
+  taxPl: number;
+  truePl: number;
+  trades: number;
+  winDays: number;
+  lossDays: number;
+};
+
 type PricePoint = {
   date: string;
   close: number;
@@ -58,6 +69,18 @@ type BenchmarkSummary = {
   qqq: number;
   alphaSpy: number;
   alphaQqq: number;
+};
+
+type ParsedResult = {
+  dailyMap: Map<string, DailyEntry>;
+  tickerMap: Map<string, TickerEntry>;
+  months: string[];
+  hasDisallowedLossColumn: boolean;
+  parseError: string;
+  detectedFormat: string;
+  totalRows: number;
+  validRows: number;
+  skippedRows: number;
 };
 
 function parseMoney(value: unknown): number {
@@ -108,6 +131,18 @@ function monthKey(date: Date): string {
 
 function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+function extractRootSymbol(value: unknown): string {
+  if (value == null) return "UNKNOWN";
+  const raw = String(value).trim();
+  if (!raw) return "UNKNOWN";
+
+  const beforeParen = raw.split("(")[0].trim();
+  const symbolMatch = beforeParen.match(/^[A-Z.]+/i);
+  if (symbolMatch) return symbolMatch[0].toUpperCase();
+
+  return beforeParen.toUpperCase();
 }
 
 function getBusinessCalendarWeeks(year: number, month: number): Date[][] {
@@ -181,6 +216,12 @@ function inferHeaders(rows: Record<string, unknown>[]) {
     lowerMap.get("action") ||
     lowerMap.get("type");
 
+  const symbolHeader =
+    lowerMap.get("symbol(cusip)") ||
+    lowerMap.get("symbol/cusip") ||
+    lowerMap.get("symbol") ||
+    lowerMap.get("cusip");
+
   const disallowedHeader =
     lowerMap.get("disallowed loss") ||
     lowerMap.get("wash sale adjustment");
@@ -193,17 +234,43 @@ function inferHeaders(rows: Record<string, unknown>[]) {
     costHeader,
     feeHeader,
     actionHeader,
+    symbolHeader,
     disallowedHeader,
   };
 }
 
-function buildDailyData(rows: Record<string, unknown>[]) {
+function detectFormat(opts: {
+  gainHeader?: string;
+  proceedsHeader?: string;
+  costHeader?: string;
+  actionHeader?: string;
+  dateHeader?: string;
+  parseError?: string;
+}) {
+  if (opts.parseError) return "Unsupported CSV";
+  if (opts.gainHeader) return "Realized gain/loss export";
+  if (opts.actionHeader && opts.proceedsHeader && !opts.costHeader) {
+    return "Account activity export";
+  }
+  if (opts.proceedsHeader && opts.costHeader) {
+    return "Calculated from amount/cost basis";
+  }
+  if (opts.dateHeader) return "Partially recognized CSV";
+  return "Unknown format";
+}
+
+function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
   if (!rows.length) {
     return {
       dailyMap: new Map<string, DailyEntry>(),
-      months: [] as string[],
+      tickerMap: new Map<string, TickerEntry>(),
+      months: [],
       hasDisallowedLossColumn: false,
       parseError: "",
+      detectedFormat: "No file loaded",
+      totalRows: 0,
+      validRows: 0,
+      skippedRows: 0,
     };
   }
 
@@ -214,49 +281,64 @@ function buildDailyData(rows: Record<string, unknown>[]) {
     costHeader,
     feeHeader,
     actionHeader,
+    symbolHeader,
     disallowedHeader,
   } = inferHeaders(rows);
 
   const hasDirectGainColumn = Boolean(gainHeader);
   const hasFallbackPLColumns = Boolean(proceedsHeader && costHeader);
   const looksLikeActivityExport =
-    Boolean(actionHeader) &&
-    Boolean(proceedsHeader) &&
-    !gainHeader &&
-    !costHeader;
+    Boolean(actionHeader) && Boolean(proceedsHeader) && !gainHeader && !costHeader;
 
   if (!dateHeader) {
     return {
       dailyMap: new Map<string, DailyEntry>(),
-      months: [] as string[],
+      tickerMap: new Map<string, TickerEntry>(),
+      months: [],
       hasDisallowedLossColumn: false,
       parseError:
         "We couldn't find a supported date column in this CSV. Try a realized gain/loss export, or upload a different format.",
+      detectedFormat: "Unsupported CSV",
+      totalRows: rows.length,
+      validRows: 0,
+      skippedRows: rows.length,
     };
   }
 
   if (looksLikeActivityExport) {
     return {
       dailyMap: new Map<string, DailyEntry>(),
-      months: [] as string[],
+      tickerMap: new Map<string, TickerEntry>(),
+      months: [],
       hasDisallowedLossColumn: false,
       parseError:
         "This CSV looks like an account activity export, not a realized gain/loss export. Try uploading a realized gain/loss CSV for accurate daily P/L results.",
+      detectedFormat: "Account activity export",
+      totalRows: rows.length,
+      validRows: 0,
+      skippedRows: rows.length,
     };
   }
 
   if (!hasDirectGainColumn && !hasFallbackPLColumns) {
     return {
       dailyMap: new Map<string, DailyEntry>(),
-      months: [] as string[],
+      tickerMap: new Map<string, TickerEntry>(),
+      months: [],
       hasDisallowedLossColumn: false,
       parseError:
         "We couldn't find a supported gain/loss column in this CSV. Try a realized gain/loss export, or upload a different format.",
+      detectedFormat: "Unsupported CSV",
+      totalRows: rows.length,
+      validRows: 0,
+      skippedRows: rows.length,
     };
   }
 
   const dailyMap = new Map<string, DailyEntry>();
+  const tickerMap = new Map<string, TickerEntry>();
   let hasDisallowedLossColumn = false;
+  let validRows = 0;
 
   rows.forEach((row) => {
     const date = parseDate(dateHeader ? row[dateHeader] : null);
@@ -265,46 +347,69 @@ function buildDailyData(rows: Record<string, unknown>[]) {
     const day = date.getDay();
     if (day === 0 || day === 6) return;
 
+    const directGain = gainHeader ? parseMoney(row[gainHeader]) : NaN;
+    const proceeds = proceedsHeader ? parseMoney(row[proceedsHeader]) : NaN;
+    const cost = costHeader ? parseMoney(row[costHeader]) : NaN;
+    const fee = feeHeader ? parseMoney(row[feeHeader]) : 0;
+
     let taxPl = NaN;
+    let truePl = NaN;
 
-    if (gainHeader) {
-      taxPl = parseMoney(row[gainHeader]);
-    }
-
-    if (Number.isNaN(taxPl) && proceedsHeader && costHeader) {
-      const proceeds = parseMoney(row[proceedsHeader]);
-      const cost = parseMoney(row[costHeader]);
-      const fee = feeHeader ? parseMoney(row[feeHeader]) : 0;
+    if (!Number.isNaN(directGain)) {
+      taxPl = directGain;
 
       if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) {
-        taxPl = proceeds - cost - (Number.isNaN(fee) ? 0 : fee);
+        truePl = proceeds - cost - (Number.isNaN(fee) ? 0 : fee);
+      } else {
+        truePl = directGain;
+      }
+    } else if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) {
+      taxPl = proceeds - cost - (Number.isNaN(fee) ? 0 : fee);
+      truePl = taxPl;
+    }
+
+    if (Number.isNaN(taxPl) || Number.isNaN(truePl)) return;
+
+    validRows += 1;
+
+    const rawDisallowed = disallowedHeader ? parseMoney(row[disallowedHeader]) : 0;
+    if (disallowedHeader && !Number.isNaN(rawDisallowed)) {
+      hasDisallowedLossColumn = true;
+
+      if (Number.isNaN(directGain)) {
+        truePl = taxPl - rawDisallowed;
       }
     }
 
-    if (Number.isNaN(taxPl)) return;
-
-    const rawDisallowed = disallowedHeader ? parseMoney(row[disallowedHeader]) : 0;
-    const disallowed = Number.isNaN(rawDisallowed) ? 0 : rawDisallowed;
-
-    if (disallowedHeader) {
-      hasDisallowedLossColumn = true;
-    }
-
-    const truePl = taxPl - disallowed;
-
     const key = isoDate(date);
-    const current = dailyMap.get(key) || {
+    const currentDay = dailyMap.get(key) || {
       date,
       taxPl: 0,
       truePl: 0,
       trades: 0,
     };
 
-    current.taxPl += taxPl;
-    current.truePl += truePl;
-    current.trades += 1;
+    currentDay.taxPl += taxPl;
+    currentDay.truePl += truePl;
+    currentDay.trades += 1;
+    dailyMap.set(key, currentDay);
 
-    dailyMap.set(key, current);
+    const symbol = extractRootSymbol(symbolHeader ? row[symbolHeader] : "UNKNOWN");
+    const currentTicker = tickerMap.get(symbol) || {
+      symbol,
+      taxPl: 0,
+      truePl: 0,
+      trades: 0,
+      winDays: 0,
+      lossDays: 0,
+    };
+
+    currentTicker.taxPl += taxPl;
+    currentTicker.truePl += truePl;
+    currentTicker.trades += 1;
+    if (taxPl > 0) currentTicker.winDays += 1;
+    if (taxPl < 0) currentTicker.lossDays += 1;
+    tickerMap.set(symbol, currentTicker);
   });
 
   const months = [...new Set([...dailyMap.values()].map((d) => monthKey(d.date)))].sort();
@@ -312,22 +417,45 @@ function buildDailyData(rows: Record<string, unknown>[]) {
   if (!dailyMap.size) {
     return {
       dailyMap,
+      tickerMap,
       months,
       hasDisallowedLossColumn,
       parseError:
         "We couldn't read any valid trading rows from this CSV. Try a realized gain/loss export, or upload a different format.",
+      detectedFormat: detectFormat({
+        gainHeader,
+        proceedsHeader,
+        costHeader,
+        actionHeader,
+        dateHeader,
+        parseError: "yes",
+      }),
+      totalRows: rows.length,
+      validRows: 0,
+      skippedRows: rows.length,
     };
   }
 
   return {
     dailyMap,
+    tickerMap,
     months,
     hasDisallowedLossColumn,
     parseError: "",
+    detectedFormat: detectFormat({
+      gainHeader,
+      proceedsHeader,
+      costHeader,
+      actionHeader,
+      dateHeader,
+    }),
+    totalRows: rows.length,
+    validRows,
+    skippedRows: rows.length - validRows,
   };
 }
 
-function getActivePl(entry: DailyEntry, mode: PLMode): number {
+function getActivePl(entry: DailyEntry | TickerEntry, mode: PLMode): number {
   return mode === "tax" ? entry.taxPl : entry.truePl;
 }
 
@@ -411,6 +539,33 @@ function StatCard({
   );
 }
 
+function FormatBadge({ label }: { label: string }) {
+  return (
+    <div className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs text-slate-300">
+      <FileSearch className="h-3.5 w-3.5" />
+      Detected: {label}
+    </div>
+  );
+}
+
+function ParsedSummary({
+  totalRows,
+  validRows,
+  skippedRows,
+}: {
+  totalRows: number;
+  validRows: number;
+  skippedRows: number;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+      <span className="rounded-full bg-slate-800 px-3 py-1">Rows read {totalRows}</span>
+      <span className="rounded-full bg-slate-800 px-3 py-1">Valid rows {validRows}</span>
+      <span className="rounded-full bg-slate-800 px-3 py-1">Skipped {skippedRows}</span>
+    </div>
+  );
+}
+
 function EmptyState() {
   return (
     <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-900/60 p-10 text-center shadow-xl">
@@ -428,6 +583,64 @@ function EmptyState() {
         <span className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</span>
       </div>
     </div>
+  );
+}
+
+function TickerBreakdown({
+  tickerRows,
+  plMode,
+}: {
+  tickerRows: TickerEntry[];
+  plMode: PLMode;
+}) {
+  return (
+    <section className="rounded-3xl border border-slate-800 bg-slate-950/90 p-5 shadow-2xl">
+      <div className="mb-4 flex items-center gap-2">
+        <Table2 className="h-4 w-4 text-slate-400" />
+        <h2 className="text-2xl font-semibold tracking-tight">Per-Ticker Breakdown</h2>
+      </div>
+
+      <div className="overflow-x-auto rounded-2xl border border-slate-800">
+        <table className="min-w-full divide-y divide-slate-800 text-sm">
+          <thead className="bg-slate-900/80 text-slate-400">
+            <tr>
+              <th className="px-4 py-3 text-left font-medium">Symbol</th>
+              <th className="px-4 py-3 text-right font-medium">P/L</th>
+              <th className="px-4 py-3 text-right font-medium">Trades</th>
+              <th className="px-4 py-3 text-right font-medium">Win Rate</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-800 bg-slate-950/40">
+            {tickerRows.map((row) => {
+              const activePl = getActivePl(row, plMode);
+              const wins = row.winDays;
+              const losses = row.lossDays;
+              const denom = wins + losses;
+              const winRate = denom ? (wins / denom) * 100 : 0;
+
+              return (
+                <tr key={row.symbol} className="hover:bg-slate-900/50">
+                  <td className="px-4 py-3 font-medium text-white">{row.symbol}</td>
+                  <td
+                    className={`px-4 py-3 text-right font-semibold ${
+                      activePl >= 0 ? "text-teal-300" : "text-red-300"
+                    }`}
+                  >
+                    {formatCurrency(activePl)}
+                  </td>
+                  <td className="px-4 py-3 text-right text-slate-300">{row.trades}</td>
+                  <td className="px-4 py-3 text-right text-slate-300">{winRate.toFixed(0)}%</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="mt-3 text-xs text-slate-500">
+        Win rate is based on parsed transaction rows, not fully matched trade positions.
+      </p>
+    </section>
   );
 }
 
@@ -565,14 +778,29 @@ export default function Page() {
   const [benchmarkError, setBenchmarkError] = useState("");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
 
-  const { dailyMap, months, hasDisallowedLossColumn, parseError } = useMemo(
-    () => buildDailyData(rows),
-    [rows]
-  );
+  const {
+    dailyMap,
+    tickerMap,
+    months,
+    hasDisallowedLossColumn,
+    parseError,
+    detectedFormat,
+    totalRows,
+    validRows,
+    skippedRows,
+  } = useMemo(() => buildDailyData(rows), [rows]);
 
   const entries = useMemo(
     () => [...dailyMap.values()].sort((a, b) => a.date.getTime() - b.date.getTime()),
     [dailyMap]
+  );
+
+  const tickerRows = useMemo(
+    () =>
+      [...tickerMap.values()].sort(
+        (a, b) => getActivePl(b, plMode) - getActivePl(a, plMode)
+      ),
+    [tickerMap, plMode]
   );
 
   useEffect(() => {
@@ -591,23 +819,16 @@ export default function Page() {
         setBenchmarkError("");
 
         const res = await fetch("/api/benchmarks");
-        if (!res.ok) {
-          throw new Error("Benchmark request failed");
-        }
+        if (!res.ok) throw new Error("Benchmark request failed");
 
         const data = await res.json();
-
-        if (!cancelled) {
-          setBenchmarkData(data);
-        }
+        if (!cancelled) setBenchmarkData(data);
       } catch {
         if (!cancelled) {
           setBenchmarkError("Could not load SPY / QQQ benchmark data.");
         }
       } finally {
-        if (!cancelled) {
-          setBenchmarkLoading(false);
-        }
+        if (!cancelled) setBenchmarkLoading(false);
       }
     }
 
@@ -620,13 +841,7 @@ export default function Page() {
 
   const benchmark = useMemo(() => {
     if (!benchmarkData) return null;
-
-    return buildCompactBenchmark(
-      entries,
-      plMode,
-      benchmarkData.spy,
-      benchmarkData.qqq
-    );
+    return buildCompactBenchmark(entries, plMode, benchmarkData.spy, benchmarkData.qqq);
   }, [entries, plMode, benchmarkData]);
 
   const totalYtd = useMemo(
@@ -661,7 +876,8 @@ export default function Page() {
   const overallWinRate = useMemo(
     () =>
       entries.length
-        ? (entries.filter((d) => getActivePl(d, plMode) > 0).length / entries.length) * 100
+        ? (entries.filter((d) => getActivePl(d, plMode) > 0).length / entries.length) *
+          100
         : 0,
     [entries, plMode]
   );
@@ -678,13 +894,11 @@ export default function Page() {
       skipEmptyLines: true,
       complete: (results) => {
         const parsedRows = results.data || [];
-
         if (!parsedRows.length) {
           setRows([]);
           setError("Could not read any rows from that CSV.");
           return;
         }
-
         setRows(parsedRows);
       },
       error: () => {
@@ -716,10 +930,16 @@ export default function Page() {
               </p>
 
               <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
-                <div className="rounded-full bg-slate-800 px-3 py-1">Client-side CSV parsing</div>
-                <div className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar exports</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">
+                  Client-side CSV parsing
+                </div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">
+                  Monthly calendar exports
+                </div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Tax + true P/L</div>
-                <div className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">
+                  Real SPY / QQQ benchmark
+                </div>
               </div>
             </div>
 
@@ -739,6 +959,17 @@ export default function Page() {
                 <Upload className="h-4 w-4" />
                 <span>{fileName || "No file selected"}</span>
               </div>
+
+              {rows.length > 0 && (
+                <div className="mt-4 space-y-3">
+                  <FormatBadge label={detectedFormat} />
+                  <ParsedSummary
+                    totalRows={totalRows}
+                    validRows={validRows}
+                    skippedRows={skippedRows}
+                  />
+                </div>
+              )}
 
               <div className="mt-4 inline-flex rounded-2xl border border-slate-700 bg-slate-950 p-1">
                 <button
@@ -763,15 +994,18 @@ export default function Page() {
                 </button>
               </div>
 
-              <p className="mt-3 text-xs leading-5 text-slate-500">
-                Tax P/L matches broker / 1099 reporting. True P/L backs out disallowed
-                losses when present.
-              </p>
+              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs leading-5 text-slate-400">
+                <span className="font-medium text-slate-200">Tax P/L</span> uses the
+                broker-reported gain/loss column.{" "}
+                <span className="font-medium text-slate-200">True P/L</span> uses proceeds
+                minus cost basis before wash-sale treatment, when available.
+              </div>
 
               {!hasDisallowedLossColumn && rows.length > 0 && !parseError && (
                 <div className="mt-3 rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-                  This CSV does not appear to include a disallowed-loss or wash-sale
-                  column, so Tax P/L and True P/L may match.
+                  This CSV does not appear to include an explicit disallowed-loss column.
+                  For Fidelity realized gain/loss files, Tax P/L uses the gain/loss column
+                  and True P/L uses proceeds minus cost basis.
                 </div>
               )}
 
@@ -860,49 +1094,45 @@ export default function Page() {
                 </div>
               )}
 
-              {!benchmarkLoading && !benchmarkError && benchmark && (
-                <>
-                  {benchmarkView === "return" ? (
-                    <div className="flex flex-wrap items-center gap-3 text-sm">
-                      <span className="rounded-lg bg-teal-900/60 px-3 py-1 font-semibold text-teal-300">
-                        You {formatPercent(benchmark.your)}
-                      </span>
-
-                      <span className="rounded-lg bg-slate-800 px-3 py-1 text-slate-300">
-                        SPY {formatPercent(benchmark.spy)}
-                      </span>
-
-                      <span className="rounded-lg bg-purple-900/40 px-3 py-1 text-purple-300">
-                        QQQ {formatPercent(benchmark.qqq)}
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-3 text-sm">
-                      <span className="text-xs text-slate-400">α vs SPY</span>
-                      <span
-                        className={`rounded-lg px-3 py-1 font-semibold ${
-                          benchmark.alphaSpy >= 0
-                            ? "bg-teal-900/40 text-teal-300"
-                            : "bg-red-900/40 text-red-300"
-                        }`}
-                      >
-                        {formatPercent(benchmark.alphaSpy)}
-                      </span>
-
-                      <span className="text-xs text-slate-400">α vs QQQ</span>
-                      <span
-                        className={`rounded-lg px-3 py-1 font-semibold ${
-                          benchmark.alphaQqq >= 0
-                            ? "bg-teal-900/40 text-teal-300"
-                            : "bg-red-900/40 text-red-300"
-                        }`}
-                      >
-                        {formatPercent(benchmark.alphaQqq)}
-                      </span>
-                    </div>
-                  )}
-                </>
-              )}
+              {!benchmarkLoading &&
+                !benchmarkError &&
+                benchmark &&
+                (benchmarkView === "return" ? (
+                  <div className="flex flex-wrap items-center gap-3 text-sm">
+                    <span className="rounded-lg bg-teal-900/60 px-3 py-1 font-semibold text-teal-300">
+                      You {formatPercent(benchmark.your)}
+                    </span>
+                    <span className="rounded-lg bg-slate-800 px-3 py-1 text-slate-300">
+                      SPY {formatPercent(benchmark.spy)}
+                    </span>
+                    <span className="rounded-lg bg-purple-900/40 px-3 py-1 text-purple-300">
+                      QQQ {formatPercent(benchmark.qqq)}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-3 text-sm">
+                    <span className="text-xs text-slate-400">α vs SPY</span>
+                    <span
+                      className={`rounded-lg px-3 py-1 font-semibold ${
+                        benchmark.alphaSpy >= 0
+                          ? "bg-teal-900/40 text-teal-300"
+                          : "bg-red-900/40 text-red-300"
+                      }`}
+                    >
+                      {formatPercent(benchmark.alphaSpy)}
+                    </span>
+                    <span className="text-xs text-slate-400">α vs QQQ</span>
+                    <span
+                      className={`rounded-lg px-3 py-1 font-semibold ${
+                        benchmark.alphaQqq >= 0
+                          ? "bg-teal-900/40 text-teal-300"
+                          : "bg-red-900/40 text-red-300"
+                      }`}
+                    >
+                      {formatPercent(benchmark.alphaQqq)}
+                    </span>
+                  </div>
+                ))}
             </div>
           </section>
         )}
@@ -917,6 +1147,33 @@ export default function Page() {
                 Review daily gains, losses, trade counts, and weekly totals by month.
               </p>
             </div>
+
+           {tickerRows.length > 0 && !parseError && (
+  <div className="space-y-3">
+    <div className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/60 px-4 py-3">
+      <div>
+        <h3 className="text-sm font-semibold text-white">Per-Ticker Breakdown</h3>
+        <p className="text-xs text-slate-400">
+          Show or hide the ticker table below.
+        </p>
+      </div>
+
+      <button
+        onClick={() => setShowTickerBreakdown((prev) => !prev)}
+        className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+      >
+        {showTickerBreakdown ? "Hide" : "Show"}
+      </button>
+    </div>
+
+    {showTickerBreakdown && (
+      <TickerBreakdown
+        tickerRows={tickerRows.slice(0, 20)}
+        plMode={plMode}
+      />
+    )}
+  </div>
+)}
 
             {months.map((month) => (
               <MonthCalendar
