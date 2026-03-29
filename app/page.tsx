@@ -36,6 +36,7 @@ const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI"];
 
 type PLMode = "tax" | "true";
 type BenchmarkView = "return" | "alpha";
+type ReportingMode = "irs" | "live";
 
 type DailyEntry = {
   date: Date;
@@ -81,6 +82,7 @@ type ParsedResult = {
   totalRows: number;
   validRows: number;
   skippedRows: number;
+  liveModeLimited: boolean;
 };
 
 function parseMoney(value: unknown): number {
@@ -89,10 +91,7 @@ function parseMoney(value: unknown): number {
   const raw = String(value).trim();
   if (raw === "" || raw === "--") return NaN;
 
-  const cleaned = raw
-    .replace(/[$,\s]/g, "")
-    .replace(/^\((.*)\)$/, "-$1");
-
+  const cleaned = raw.replace(/[$,\s]/g, "").replace(/^\((.*)\)$/, "-$1");
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : NaN;
 }
@@ -212,9 +211,7 @@ function inferHeaders(rows: Record<string, unknown>[]) {
     lowerMap.get("fees ($)") ||
     lowerMap.get("fee");
 
-  const actionHeader =
-    lowerMap.get("action") ||
-    lowerMap.get("type");
+  const actionHeader = lowerMap.get("action") || lowerMap.get("type");
 
   const symbolHeader =
     lowerMap.get("symbol(cusip)") ||
@@ -224,7 +221,8 @@ function inferHeaders(rows: Record<string, unknown>[]) {
 
   const disallowedHeader =
     lowerMap.get("disallowed loss") ||
-    lowerMap.get("wash sale adjustment");
+    lowerMap.get("wash sale adjustment") ||
+    lowerMap.get("wash sales");
 
   return {
     headers,
@@ -249,13 +247,20 @@ function detectFormat(opts: {
 }) {
   if (opts.parseError) return "Unsupported CSV";
   if (opts.gainHeader) return "Realized gain/loss export";
-  if (opts.actionHeader && opts.proceedsHeader && !opts.costHeader) return "Account activity export";
-  if (opts.proceedsHeader && opts.costHeader) return "Calculated from amount/cost basis";
+  if (opts.actionHeader && opts.proceedsHeader && !opts.costHeader) {
+    return "Account activity export";
+  }
+  if (opts.proceedsHeader && opts.costHeader) {
+    return "Calculated from amount/cost basis";
+  }
   if (opts.dateHeader) return "Partially recognized CSV";
   return "Unknown format";
 }
 
-function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
+function buildDailyData(
+  rows: Record<string, unknown>[],
+  reportingMode: ReportingMode
+): ParsedResult {
   if (!rows.length) {
     return {
       dailyMap: new Map<string, DailyEntry>(),
@@ -267,6 +272,7 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
       totalRows: 0,
       validRows: 0,
       skippedRows: 0,
+      liveModeLimited: false,
     };
   }
 
@@ -298,21 +304,23 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
       totalRows: rows.length,
       validRows: 0,
       skippedRows: rows.length,
+      liveModeLimited: false,
     };
   }
 
-  if (looksLikeActivityExport) {
+  if (looksLikeActivityExport && reportingMode === "irs") {
     return {
       dailyMap: new Map<string, DailyEntry>(),
       tickerMap: new Map<string, TickerEntry>(),
       months: [],
       hasDisallowedLossColumn: false,
       parseError:
-        "This CSV looks like an account activity export, not a realized gain/loss export. Try uploading a realized gain/loss CSV for accurate daily P/L results.",
+        "This CSV looks like an account activity export. IRS Mode works best with a realized gain/loss or 1099-style export.",
       detectedFormat: "Account activity export",
       totalRows: rows.length,
       validRows: 0,
       skippedRows: rows.length,
+      liveModeLimited: false,
     };
   }
 
@@ -328,6 +336,7 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
       totalRows: rows.length,
       validRows: 0,
       skippedRows: rows.length,
+      liveModeLimited: false,
     };
   }
 
@@ -335,6 +344,7 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
   const tickerMap = new Map<string, TickerEntry>();
   let hasDisallowedLossColumn = false;
   let validRows = 0;
+  let liveModeLimited = false;
 
   rows.forEach((row) => {
     const date = parseDate(dateHeader ? row[dateHeader] : null);
@@ -347,40 +357,46 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
     const proceeds = proceedsHeader ? parseMoney(row[proceedsHeader]) : NaN;
     const cost = costHeader ? parseMoney(row[costHeader]) : NaN;
     const fee = feeHeader ? parseMoney(row[feeHeader]) : 0;
+    const rawDisallowed = disallowedHeader ? parseMoney(row[disallowedHeader]) : NaN;
 
     let taxPl = NaN;
     let truePl = NaN;
 
-    // Fidelity realized G/L style:
-    // taxPl = direct gain/loss column (already wash-sale adjusted)
-    // truePl = proceeds - cost basis - fees
-    if (!Number.isNaN(directGain)) {
-      taxPl = directGain;
+    if (reportingMode === "irs") {
+      if (!Number.isNaN(directGain)) {
+        taxPl = directGain;
+        truePl = directGain;
+      } else if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) {
+        taxPl = proceeds - cost - (Number.isNaN(fee) ? 0 : fee);
+        truePl = taxPl;
 
+        if (!Number.isNaN(rawDisallowed)) {
+          hasDisallowedLossColumn = true;
+          truePl = taxPl - rawDisallowed;
+        }
+      }
+    }
+
+    if (reportingMode === "live") {
       if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) {
         truePl = proceeds - cost - (Number.isNaN(fee) ? 0 : fee);
-      } else {
+        taxPl = !Number.isNaN(directGain) ? directGain : truePl;
+
+        if (!Number.isNaN(rawDisallowed)) {
+          hasDisallowedLossColumn = true;
+          taxPl = truePl + rawDisallowed;
+        }
+      } else if (!Number.isNaN(directGain)) {
+        // Fidelity realized-G/L type file: live reconstruction not trustworthy
+        taxPl = directGain;
         truePl = directGain;
+        liveModeLimited = true;
       }
-    } else if (!Number.isNaN(proceeds) && !Number.isNaN(cost)) {
-      // fallback format
-      taxPl = proceeds - cost - (Number.isNaN(fee) ? 0 : fee);
-      truePl = taxPl;
     }
 
     if (Number.isNaN(taxPl) || Number.isNaN(truePl)) return;
 
     validRows += 1;
-
-    const rawDisallowed = disallowedHeader ? parseMoney(row[disallowedHeader]) : 0;
-    if (disallowedHeader && !Number.isNaN(rawDisallowed)) {
-      hasDisallowedLossColumn = true;
-      // if a file explicitly provides disallowed loss and there is no direct gain column,
-      // back true P/L out from tax P/L
-      if (Number.isNaN(directGain)) {
-        truePl = taxPl - rawDisallowed;
-      }
-    }
 
     const key = isoDate(date);
     const currentDay = dailyMap.get(key) || {
@@ -408,8 +424,11 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
     currentTicker.taxPl += taxPl;
     currentTicker.truePl += truePl;
     currentTicker.trades += 1;
-    if (taxPl > 0) currentTicker.winDays += 1;
-    if (taxPl < 0) currentTicker.lossDays += 1;
+
+    const activePl = reportingMode === "irs" ? taxPl : truePl;
+    if (activePl > 0) currentTicker.winDays += 1;
+    if (activePl < 0) currentTicker.lossDays += 1;
+
     tickerMap.set(symbol, currentTicker);
   });
 
@@ -422,7 +441,9 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
       months,
       hasDisallowedLossColumn,
       parseError:
-        "We couldn't read any valid trading rows from this CSV. Try a realized gain/loss export, or upload a different format.",
+        reportingMode === "irs"
+          ? "We couldn't read any valid IRS-style trading rows from this CSV."
+          : "We couldn't read any valid live/activity-style trading rows from this CSV.",
       detectedFormat: detectFormat({
         gainHeader,
         proceedsHeader,
@@ -434,6 +455,7 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
       totalRows: rows.length,
       validRows: 0,
       skippedRows: rows.length,
+      liveModeLimited,
     };
   }
 
@@ -453,6 +475,7 @@ function buildDailyData(rows: Record<string, unknown>[]): ParsedResult {
     totalRows: rows.length,
     validRows,
     skippedRows: rows.length - validRows,
+    liveModeLimited,
   };
 }
 
@@ -580,7 +603,7 @@ function EmptyState() {
       <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
         <span className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar view</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">PNG export</span>
-        <span className="rounded-full bg-slate-800 px-3 py-1">Tax + true P/L</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</span>
       </div>
     </div>
@@ -630,7 +653,9 @@ function TickerBreakdown({
                     {formatCurrency(activePl)}
                   </td>
                   <td className="px-4 py-3 text-right text-slate-300">{row.trades}</td>
-                  <td className="px-4 py-3 text-right text-slate-300">{winRate.toFixed(0)}%</td>
+                  <td className="px-4 py-3 text-right text-slate-300">
+                    {winRate.toFixed(0)}%
+                  </td>
                 </tr>
               );
             })}
@@ -774,11 +799,13 @@ export default function Page() {
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const [plMode, setPlMode] = useState<PLMode>("tax");
+  const [reportingMode, setReportingMode] = useState<ReportingMode>("irs");
   const [benchmarkView, setBenchmarkView] = useState<BenchmarkView>("return");
   const [benchmarkData, setBenchmarkData] = useState<BenchmarkData | null>(null);
   const [benchmarkError, setBenchmarkError] = useState("");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
   const [showTickerBreakdown, setShowTickerBreakdown] = useState(true);
+
   const {
     dailyMap,
     tickerMap,
@@ -789,7 +816,8 @@ export default function Page() {
     totalRows,
     validRows,
     skippedRows,
-  } = useMemo(() => buildDailyData(rows), [rows]);
+    liveModeLimited,
+  } = useMemo(() => buildDailyData(rows, reportingMode), [rows, reportingMode]);
 
   const entries = useMemo(
     () => [...dailyMap.values()].sort((a, b) => a.date.getTime() - b.date.getTime()),
@@ -797,7 +825,10 @@ export default function Page() {
   );
 
   const tickerRows = useMemo(
-    () => [...tickerMap.values()].sort((a, b) => getActivePl(b, plMode) - getActivePl(a, plMode)),
+    () =>
+      [...tickerMap.values()].sort(
+        (a, b) => getActivePl(b, plMode) - getActivePl(a, plMode)
+      ),
     [tickerMap, plMode]
   );
 
@@ -822,7 +853,9 @@ export default function Page() {
         const data = await res.json();
         if (!cancelled) setBenchmarkData(data);
       } catch {
-        if (!cancelled) setBenchmarkError("Could not load SPY / QQQ benchmark data.");
+        if (!cancelled) {
+          setBenchmarkError("Could not load SPY / QQQ benchmark data.");
+        }
       } finally {
         if (!cancelled) setBenchmarkLoading(false);
       }
@@ -849,7 +882,9 @@ export default function Page() {
     () =>
       entries.reduce(
         (best, d) =>
-          best == null || getActivePl(d, plMode) > getActivePl(best, plMode) ? d : best,
+          best == null || getActivePl(d, plMode) > getActivePl(best, plMode)
+            ? d
+            : best,
         null as DailyEntry | null
       ),
     [entries, plMode]
@@ -859,7 +894,9 @@ export default function Page() {
     () =>
       entries.reduce(
         (worst, d) =>
-          worst == null || getActivePl(d, plMode) < getActivePl(worst, plMode) ? d : worst,
+          worst == null || getActivePl(d, plMode) < getActivePl(worst, plMode)
+            ? d
+            : worst,
         null as DailyEntry | null
       ),
     [entries, plMode]
@@ -923,7 +960,7 @@ export default function Page() {
               <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
                 <div className="rounded-full bg-slate-800 px-3 py-1">Client-side CSV parsing</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar exports</div>
-                <div className="rounded-full bg-slate-800 px-3 py-1">Tax + true P/L</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</div>
               </div>
             </div>
@@ -948,9 +985,52 @@ export default function Page() {
               {rows.length > 0 && (
                 <div className="mt-4 space-y-3">
                   <FormatBadge label={detectedFormat} />
-                  <ParsedSummary totalRows={totalRows} validRows={validRows} skippedRows={skippedRows} />
+                  <ParsedSummary
+                    totalRows={totalRows}
+                    validRows={validRows}
+                    skippedRows={skippedRows}
+                  />
                 </div>
               )}
+
+              <div className="mt-4 inline-flex rounded-2xl border border-slate-700 bg-slate-950 p-1">
+                <button
+                  onClick={() => setReportingMode("irs")}
+                  className={`rounded-xl px-4 py-2 text-sm ${
+                    reportingMode === "irs"
+                      ? "bg-teal-700 text-white"
+                      : "text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  IRS Mode
+                </button>
+                <button
+                  onClick={() => setReportingMode("live")}
+                  className={`rounded-xl px-4 py-2 text-sm ${
+                    reportingMode === "live"
+                      ? "bg-teal-700 text-white"
+                      : "text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  Live Mode
+                </button>
+              </div>
+
+              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs leading-5 text-slate-400">
+                {reportingMode === "irs" ? (
+                  <>
+                    <span className="font-medium text-slate-200">IRS Mode</span> uses finalized
+                    broker-reported values when available and is best for reconciling to
+                    1099-style tax documents.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-medium text-slate-200">Live Mode</span> uses the
+                    best available activity-style or reconstructed values for performance
+                    tracking and may not match final tax forms.
+                  </>
+                )}
+              </div>
 
               <div className="mt-4 inline-flex rounded-2xl border border-slate-700 bg-slate-950 p-1">
                 <button
@@ -975,13 +1055,25 @@ export default function Page() {
                 </button>
               </div>
 
-              <p className="mt-3 text-xs leading-5 text-slate-500">
-                Tax P/L matches broker / 1099 reporting. True P/L shows the raw realized result before wash-sale treatment when available.
-              </p>
+              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs leading-5 text-slate-400">
+                <span className="font-medium text-slate-200">Tax P/L</span> shows the tax-oriented
+                value for the selected reporting mode.{" "}
+                <span className="font-medium text-slate-200">True P/L</span> shows the best
+                available raw or reconstructed performance value when supported by the file.
+              </div>
+
+              {reportingMode === "live" && liveModeLimited && !parseError && (
+                <div className="mt-3 rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                  Live Mode is limited for this file. This CSV looks more like a finalized
+                  realized gain/loss export than a raw activity feed, so some live values may
+                  fall back to broker-reported amounts.
+                </div>
+              )}
 
               {!hasDisallowedLossColumn && rows.length > 0 && !parseError && (
                 <div className="mt-3 rounded-xl border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-                  This CSV does not appear to include an explicit disallowed-loss column. For Fidelity realized gain/loss files, Tax P/L uses the gain/loss column and True P/L uses proceeds minus cost basis.
+                  This CSV does not appear to include an explicit disallowed-loss column.
+                  Some tax-vs-live differences may not be fully reconstructible from this file alone.
                 </div>
               )}
 
@@ -1003,7 +1095,15 @@ export default function Page() {
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <StatCard
             icon={<BarChart3 className="h-4 w-4" />}
-            label={plMode === "tax" ? "YTD Tax P/L" : "YTD True P/L"}
+            label={
+              reportingMode === "irs"
+                ? plMode === "tax"
+                  ? "IRS Tax P/L"
+                  : "IRS True P/L"
+                : plMode === "tax"
+                ? "Live Tax P/L"
+                : "Live True P/L"
+            }
             value={formatCurrency(totalYtd)}
             subtext="Across all parsed trading days"
           />
@@ -1070,7 +1170,9 @@ export default function Page() {
                 </div>
               )}
 
-              {!benchmarkLoading && !benchmarkError && benchmark &&
+              {!benchmarkLoading &&
+                !benchmarkError &&
+                benchmark &&
                 (benchmarkView === "return" ? (
                   <div className="flex flex-wrap items-center gap-3 text-sm">
                     <span className="rounded-lg bg-teal-900/60 px-3 py-1 font-semibold text-teal-300">
@@ -1122,32 +1224,30 @@ export default function Page() {
               </p>
             </div>
 
-          {tickerRows.length > 0 && !parseError && (
-  <div className="space-y-3">
-    <div className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/60 px-4 py-3">
-      <div>
-        <h3 className="text-sm font-semibold text-white">Per-Ticker Breakdown</h3>
-        <p className="text-xs text-slate-400">
-          Show or hide the ticker table below.
-        </p>
-      </div>
+            {tickerRows.length > 0 && !parseError && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/60 px-4 py-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Per-Ticker Breakdown</h3>
+                    <p className="text-xs text-slate-400">Show or hide the ticker table below.</p>
+                  </div>
 
-      <button
-        onClick={() => setShowTickerBreakdown((prev) => !prev)}
-        className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
-      >
-        {showTickerBreakdown ? "Hide" : "Show"}
-      </button>
-    </div>
+                  <button
+                    onClick={() => setShowTickerBreakdown((prev) => !prev)}
+                    className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+                  >
+                    {showTickerBreakdown ? "Hide" : "Show"}
+                  </button>
+                </div>
 
-    {showTickerBreakdown && (
-      <TickerBreakdown
-        tickerRows={tickerRows.slice(0, 20)}
-        plMode={plMode}
-      />
-    )}
-  </div>
-)}
+                {showTickerBreakdown && (
+                  <TickerBreakdown
+                    tickerRows={tickerRows.slice(0, 20)}
+                    plMode={plMode}
+                  />
+                )}
+              </div>
+            )}
 
             {months.map((month) => (
               <MonthCalendar
