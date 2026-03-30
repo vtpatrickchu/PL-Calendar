@@ -55,6 +55,19 @@ type TickerEntry = {
   lossDays: number;
 };
 
+type TradeRow = {
+  date: Date;
+  dateKey: string;
+  symbol: string;
+  action: string;
+  proceeds: number;
+  cost: number;
+  fee: number;
+  taxPl: number;
+  truePl: number;
+  raw: Record<string, unknown>;
+};
+
 type PricePoint = {
   date: string;
   close: number;
@@ -76,6 +89,7 @@ type BenchmarkSummary = {
 type ParsedResult = {
   dailyMap: Map<string, DailyEntry>;
   tickerMap: Map<string, TickerEntry>;
+  tradeRowsByDate: Map<string, TradeRow[]>;
   months: string[];
   hasDisallowedLossColumn: boolean;
   parseError: string;
@@ -266,6 +280,7 @@ function buildDailyData(
     return {
       dailyMap: new Map<string, DailyEntry>(),
       tickerMap: new Map<string, TickerEntry>(),
+      tradeRowsByDate: new Map<string, TradeRow[]>(),
       months: [],
       hasDisallowedLossColumn: false,
       parseError: "",
@@ -297,6 +312,7 @@ function buildDailyData(
     return {
       dailyMap: new Map<string, DailyEntry>(),
       tickerMap: new Map<string, TickerEntry>(),
+      tradeRowsByDate: new Map<string, TradeRow[]>(),
       months: [],
       hasDisallowedLossColumn: false,
       parseError:
@@ -313,6 +329,7 @@ function buildDailyData(
     return {
       dailyMap: new Map<string, DailyEntry>(),
       tickerMap: new Map<string, TickerEntry>(),
+      tradeRowsByDate: new Map<string, TradeRow[]>(),
       months: [],
       hasDisallowedLossColumn: false,
       parseError:
@@ -329,6 +346,7 @@ function buildDailyData(
     return {
       dailyMap: new Map<string, DailyEntry>(),
       tickerMap: new Map<string, TickerEntry>(),
+      tradeRowsByDate: new Map<string, TradeRow[]>(),
       months: [],
       hasDisallowedLossColumn: false,
       parseError:
@@ -343,6 +361,7 @@ function buildDailyData(
 
   const dailyMap = new Map<string, DailyEntry>();
   const tickerMap = new Map<string, TickerEntry>();
+  const tradeRowsByDate = new Map<string, TradeRow[]>();
   let hasDisallowedLossColumn = false;
   let validRows = 0;
   let liveModeLimited = false;
@@ -399,6 +418,10 @@ function buildDailyData(
     validRows += 1;
 
     const key = isoDate(date);
+    const symbol = extractRootSymbol(symbolHeader ? row[symbolHeader] : "UNKNOWN");
+    const action =
+      actionHeader && row[actionHeader] != null ? String(row[actionHeader]) : "Trade";
+
     const currentDay = dailyMap.get(key) || {
       date,
       taxPl: 0,
@@ -411,7 +434,6 @@ function buildDailyData(
     currentDay.trades += 1;
     dailyMap.set(key, currentDay);
 
-    const symbol = extractRootSymbol(symbolHeader ? row[symbolHeader] : "UNKNOWN");
     const currentTicker = tickerMap.get(symbol) || {
       symbol,
       taxPl: 0,
@@ -430,6 +452,23 @@ function buildDailyData(
     if (activePl < 0) currentTicker.lossDays += 1;
 
     tickerMap.set(symbol, currentTicker);
+
+    const tradeRow: TradeRow = {
+      date,
+      dateKey: key,
+      symbol,
+      action,
+      proceeds: Number.isNaN(proceeds) ? 0 : proceeds,
+      cost: Number.isNaN(cost) ? 0 : cost,
+      fee: Number.isNaN(fee) ? 0 : fee,
+      taxPl,
+      truePl,
+      raw: row,
+    };
+
+    const existingTrades = tradeRowsByDate.get(key) || [];
+    existingTrades.push(tradeRow);
+    tradeRowsByDate.set(key, existingTrades);
   });
 
   const months = [...new Set([...dailyMap.values()].map((d) => monthKey(d.date)))].sort();
@@ -438,6 +477,7 @@ function buildDailyData(
     return {
       dailyMap,
       tickerMap,
+      tradeRowsByDate,
       months,
       hasDisallowedLossColumn,
       parseError:
@@ -462,6 +502,7 @@ function buildDailyData(
   return {
     dailyMap,
     tickerMap,
+    tradeRowsByDate,
     months,
     hasDisallowedLossColumn,
     parseError: "",
@@ -601,10 +642,99 @@ function EmptyState() {
         Supports realized gain/loss and account-history style exports. Your file stays in your browser in this version.
       </p>
       <div className="mt-6 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
-        <span className="rounded-full bg-slate-800 px-3 py-1">Monthly calendar view</span>
-        <span className="rounded-full bg-slate-800 px-3 py-1">PNG export</span>
-        <span className="rounded-full bg-slate-800 px-3 py-1">Trade counts by week/month/YTD</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">Click a day to view trades</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">Weekly/monthly/YTD trade counts</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</span>
+      </div>
+    </div>
+  );
+}
+
+function DayTradesModal({
+  dateKey,
+  trades,
+  plMode,
+  onClose,
+}: {
+  dateKey: string | null;
+  trades: TradeRow[];
+  plMode: PLMode;
+  onClose: () => void;
+}) {
+  if (!dateKey) return null;
+
+  const total = trades.reduce(
+    (sum, trade) => sum + (plMode === "tax" ? trade.taxPl : trade.truePl),
+    0
+  );
+
+  const dateLabel = new Date(`${dateKey}T00:00:00`).toLocaleDateString();
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="w-full max-w-3xl rounded-3xl border border-slate-800 bg-slate-950 p-5 shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-semibold text-white">{dateLabel}</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              {trades.length} trades · Total {formatCurrency(total)}
+            </p>
+          </div>
+
+          <button
+            onClick={onClose}
+            className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="mt-4 max-h-[460px] overflow-y-auto rounded-2xl border border-slate-800">
+          <table className="min-w-full divide-y divide-slate-800 text-sm">
+            <thead className="bg-slate-900 text-slate-400">
+              <tr>
+                <th className="px-4 py-3 text-left font-medium">Symbol</th>
+                <th className="px-4 py-3 text-left font-medium">Action</th>
+                <th className="px-4 py-3 text-right font-medium">Proceeds</th>
+                <th className="px-4 py-3 text-right font-medium">Cost</th>
+                <th className="px-4 py-3 text-right font-medium">P/L</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800 bg-slate-950/40">
+              {trades.map((trade, i) => {
+                const pl = plMode === "tax" ? trade.taxPl : trade.truePl;
+
+                return (
+                  <tr
+                    key={`${trade.dateKey}-${trade.symbol}-${trade.action}-${i}`}
+                    className="hover:bg-slate-900/50"
+                  >
+                    <td className="px-4 py-3 font-medium text-white">{trade.symbol}</td>
+                    <td className="px-4 py-3 text-slate-300">{trade.action}</td>
+                    <td className="px-4 py-3 text-right text-slate-300">
+                      {formatCurrency(trade.proceeds)}
+                    </td>
+                    <td className="px-4 py-3 text-right text-slate-300">
+                      {formatCurrency(trade.cost)}
+                    </td>
+                    <td
+                      className={`px-4 py-3 text-right font-semibold ${
+                        pl >= 0 ? "text-teal-300" : "text-red-300"
+                      }`}
+                    >
+                      {formatCurrency(pl)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="mt-3 text-xs text-slate-500">
+          Showing parsed rows from the uploaded CSV for this date.
+        </p>
       </div>
     </div>
   );
@@ -674,10 +804,12 @@ function MonthCalendar({
   month,
   dailyMap,
   plMode,
+  onDayClick,
 }: {
   month: string;
   dailyMap: Map<string, DailyEntry>;
   plMode: PLMode;
+  onDayClick?: (dateKey: string) => void;
 }) {
   const [year, monthNum] = month.split("-").map(Number);
   const label = `${MONTH_NAMES[monthNum - 1]} ${year}`;
@@ -776,8 +908,17 @@ function MonthCalendar({
                   return (
                     <div
                       key={key}
-                      title={`${date.toDateString()} | ${formatCurrency(pl)} | ${trades} trades`}
-                      className={`min-h-[108px] rounded-2xl border p-3 transition-all hover:scale-[1.01] ${tileClasses(pl, !inMonth)}`}
+                      onClick={() => {
+                        if (inMonth && entry && onDayClick) onDayClick(key);
+                      }}
+                      title={
+                        inMonth && entry
+                          ? `${date.toDateString()} | ${formatCurrency(pl)} | ${trades} trades | Click to view trades`
+                          : `${date.toDateString()}`
+                      }
+                      className={`min-h-[108px] rounded-2xl border p-3 transition-all hover:scale-[1.01] ${
+                        inMonth && entry ? "cursor-pointer" : ""
+                      } ${tileClasses(pl, !inMonth)}`}
                     >
                       <div className="text-xs font-medium text-slate-200">{date.getDate()}</div>
                       {inMonth && (
@@ -816,10 +957,12 @@ export default function Page() {
   const [benchmarkError, setBenchmarkError] = useState("");
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
   const [showTickerBreakdown, setShowTickerBreakdown] = useState(true);
+  const [selectedDateKey, setSelectedDateKey] = useState<string | null>(null);
 
   const {
     dailyMap,
     tickerMap,
+    tradeRowsByDate,
     months,
     hasDisallowedLossColumn,
     parseError,
@@ -846,6 +989,11 @@ export default function Page() {
   const totalTradesYtd = useMemo(
     () => entries.reduce((sum, d) => sum + d.trades, 0),
     [entries]
+  );
+
+  const selectedTrades = useMemo(
+    () => (selectedDateKey ? tradeRowsByDate.get(selectedDateKey) || [] : []),
+    [selectedDateKey, tradeRowsByDate]
   );
 
   useEffect(() => {
@@ -932,6 +1080,7 @@ export default function Page() {
 
     setFileName(file.name);
     setError("");
+    setSelectedDateKey(null);
 
     Papa.parse<Record<string, unknown>>(file, {
       header: true,
@@ -969,12 +1118,12 @@ export default function Page() {
 
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-400">
                 Upload a realized gain/loss or account-history CSV and instantly generate
-                polished trading calendar views, weekly totals, trade counts, high-level performance
-                stats, and a compact SPY / QQQ benchmark.
+                polished trading calendar views, weekly totals, trade counts, daily trade popups,
+                high-level performance stats, and a compact SPY / QQQ benchmark.
               </p>
 
               <div className="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
-                <div className="rounded-full bg-slate-800 px-3 py-1">Client-side CSV parsing</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">Click a day to view trades</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Weekly/monthly/YTD trade counts</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</div>
@@ -1277,11 +1426,19 @@ export default function Page() {
                 month={month}
                 dailyMap={dailyMap}
                 plMode={plMode}
+                onDayClick={setSelectedDateKey}
               />
             ))}
           </section>
         )}
       </div>
+
+      <DayTradesModal
+        dateKey={selectedDateKey}
+        trades={selectedTrades}
+        plMode={plMode}
+        onClose={() => setSelectedDateKey(null)}
+      />
     </main>
   );
 }
