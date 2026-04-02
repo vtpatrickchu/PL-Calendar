@@ -528,9 +528,12 @@ function buildCompactBenchmark(
   entries: DailyEntry[],
   plMode: PLMode,
   spyPrices: PricePoint[],
-  qqqPrices: PricePoint[]
+  qqqPrices: PricePoint[],
+  startingCapital: number
 ): BenchmarkSummary | null {
-  if (!entries.length || !spyPrices.length || !qqqPrices.length) return null;
+  if (!entries.length || !spyPrices.length || !qqqPrices.length || startingCapital <= 0) {
+    return null;
+  }
 
   const spyMap = new Map(spyPrices.map((p) => [p.date, p.close]));
   const qqqMap = new Map(qqqPrices.map((p) => [p.date, p.close]));
@@ -552,14 +555,12 @@ function buildCompactBenchmark(
 
   if (!spyStart || !qqqStart || !spyEnd || !qqqEnd) return null;
 
-  const startingCapital = 100;
-  let yourEquity = startingCapital;
+  const totalPl = filteredEntries.reduce(
+    (sum, entry) => sum + getActivePl(entry, plMode),
+    0
+  );
 
-  for (const entry of filteredEntries) {
-    yourEquity += getActivePl(entry, plMode);
-  }
-
-  const yourReturn = ((yourEquity / startingCapital) - 1) * 100;
+  const yourReturn = (totalPl / startingCapital) * 100;
   const spyReturn = ((spyEnd / spyStart) - 1) * 100;
   const qqqReturn = ((qqqEnd / qqqStart) - 1) * 100;
 
@@ -645,7 +646,7 @@ function EmptyState() {
         <span className="rounded-full bg-slate-800 px-3 py-1">Click a day to view trades</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">Weekly/monthly/YTD trade counts</span>
         <span className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</span>
-        <span className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</span>
+        <span className="rounded-full bg-slate-800 px-3 py-1">SPY / QQQ comparison</span>
       </div>
     </div>
   );
@@ -958,6 +959,7 @@ export default function Page() {
   const [benchmarkLoading, setBenchmarkLoading] = useState(false);
   const [showTickerBreakdown, setShowTickerBreakdown] = useState(true);
   const [selectedDateKey, setSelectedDateKey] = useState<string | null>(null);
+  const [startingCapital, setStartingCapital] = useState(10000);
 
   const {
     dailyMap,
@@ -1012,13 +1014,32 @@ export default function Page() {
         setBenchmarkError("");
 
         const res = await fetch("/api/benchmarks");
-        if (!res.ok) throw new Error("Benchmark request failed");
-
         const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(
+            typeof data?.error === "string"
+              ? data.error
+              : "Could not load SPY / QQQ benchmark data."
+          );
+        }
+
+        if (
+          !data ||
+          !Array.isArray(data.spy) ||
+          !Array.isArray(data.qqq) ||
+          data.spy.length === 0 ||
+          data.qqq.length === 0
+        ) {
+          throw new Error("Benchmark data came back empty.");
+        }
+
         if (!cancelled) setBenchmarkData(data);
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          setBenchmarkError("Could not load SPY / QQQ benchmark data.");
+          setBenchmarkError(
+            err instanceof Error ? err.message : "Could not load SPY / QQQ benchmark data."
+          );
         }
       } finally {
         if (!cancelled) setBenchmarkLoading(false);
@@ -1034,8 +1055,14 @@ export default function Page() {
 
   const benchmark = useMemo(() => {
     if (!benchmarkData) return null;
-    return buildCompactBenchmark(entries, plMode, benchmarkData.spy, benchmarkData.qqq);
-  }, [entries, plMode, benchmarkData]);
+    return buildCompactBenchmark(
+      entries,
+      plMode,
+      benchmarkData.spy,
+      benchmarkData.qqq,
+      startingCapital
+    );
+  }, [entries, plMode, benchmarkData, startingCapital]);
 
   const totalYtd = useMemo(
     () => entries.reduce((sum, d) => sum + getActivePl(d, plMode), 0),
@@ -1126,7 +1153,7 @@ export default function Page() {
                 <div className="rounded-full bg-slate-800 px-3 py-1">Click a day to view trades</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">Weekly/monthly/YTD trade counts</div>
                 <div className="rounded-full bg-slate-800 px-3 py-1">IRS + live modes</div>
-                <div className="rounded-full bg-slate-800 px-3 py-1">Real SPY / QQQ benchmark</div>
+                <div className="rounded-full bg-slate-800 px-3 py-1">SPY / QQQ comparison</div>
               </div>
             </div>
 
@@ -1307,27 +1334,42 @@ export default function Page() {
                   Benchmark
                 </div>
 
-                <div className="inline-flex rounded-xl border border-slate-700 bg-slate-950 p-1">
-                  <button
-                    onClick={() => setBenchmarkView("return")}
-                    className={`rounded-lg px-3 py-1 text-xs ${
-                      benchmarkView === "return"
-                        ? "bg-slate-700 text-white"
-                        : "text-slate-300 hover:bg-slate-800"
-                    }`}
-                  >
-                    % Return
-                  </button>
-                  <button
-                    onClick={() => setBenchmarkView("alpha")}
-                    className={`rounded-lg px-3 py-1 text-xs ${
-                      benchmarkView === "alpha"
-                        ? "bg-slate-700 text-white"
-                        : "text-slate-300 hover:bg-slate-800"
-                    }`}
-                  >
-                    Alpha
-                  </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <label htmlFor="startingCapital">Start capital</label>
+                    <input
+                      id="startingCapital"
+                      type="number"
+                      min="1"
+                      step="100"
+                      value={startingCapital}
+                      onChange={(e) => setStartingCapital(Number(e.target.value) || 0)}
+                      className="w-28 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white"
+                    />
+                  </div>
+
+                  <div className="inline-flex rounded-xl border border-slate-700 bg-slate-950 p-1">
+                    <button
+                      onClick={() => setBenchmarkView("return")}
+                      className={`rounded-lg px-3 py-1 text-xs ${
+                        benchmarkView === "return"
+                          ? "bg-slate-700 text-white"
+                          : "text-slate-300 hover:bg-slate-800"
+                      }`}
+                    >
+                      % Return
+                    </button>
+                    <button
+                      onClick={() => setBenchmarkView("alpha")}
+                      className={`rounded-lg px-3 py-1 text-xs ${
+                        benchmarkView === "alpha"
+                          ? "bg-slate-700 text-white"
+                          : "text-slate-300 hover:bg-slate-800"
+                      }`}
+                    >
+                      Alpha
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1336,8 +1378,8 @@ export default function Page() {
               )}
 
               {!benchmarkLoading && benchmarkError && (
-                <div className="text-sm text-slate-400">
-                  Benchmark unavailable (data couldn’t load)
+                <div className="rounded-xl border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {benchmarkError}
                 </div>
               )}
 
@@ -1380,6 +1422,12 @@ export default function Page() {
                     </span>
                   </div>
                 ))}
+
+              {!benchmarkLoading && !benchmarkError && !benchmark && (
+                <div className="text-sm text-slate-400">
+                  Benchmark data loaded, but there were not enough overlapping dates to compare yet.
+                </div>
+              )}
             </div>
           </section>
         )}
