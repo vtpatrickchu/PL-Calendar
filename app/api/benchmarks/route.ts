@@ -1,48 +1,67 @@
 import { NextResponse } from "next/server";
 
-type PricePoint = {
-  date: string;
-  close: number;
+type YahooChartResponse = {
+  chart?: {
+    result?: Array<{
+      timestamp?: number[];
+      indicators?: {
+        quote?: Array<{
+          close?: Array<number | null>;
+        }>;
+      };
+    }>;
+  };
 };
 
-async function fetchStooqSeries(symbol: "spy" | "qqq"): Promise<PricePoint[]> {
-  const url = `https://stooq.com/q/d/l/?s=${symbol}.us&i=d`;
+async function fetchYahooHistory(symbol: string) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1y&interval=1d`;
 
   const res = await fetch(url, {
-    next: { revalidate: 3600 },
+    cache: "no-store",
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+    },
   });
 
   if (!res.ok) {
-    throw new Error(`Failed to fetch ${symbol}`);
+    throw new Error(`Failed to fetch ${symbol}: ${res.status}`);
   }
 
-  const csv = await res.text();
-  const lines = csv.trim().split("\n");
+  const data = (await res.json()) as YahooChartResponse;
+  const result = data.chart?.result?.[0];
+  const timestamps = result?.timestamp ?? [];
+  const closes = result?.indicators?.quote?.[0]?.close ?? [];
 
-  const rows = lines.slice(1);
+  if (!timestamps.length || !closes.length) {
+    throw new Error(`Invalid ${symbol} response`);
+  }
 
-  return rows
-    .map((line) => {
-      const [date, , , , close] = line.split(",");
-      return {
-        date,
-        close: Number(close),
-      };
-    })
-    .filter((r) => r.date && Number.isFinite(r.close));
+  return timestamps
+    .map((ts, i) => ({
+      date: new Date(ts * 1000).toISOString().slice(0, 10),
+      close: closes[i],
+    }))
+    .filter((row): row is { date: string; close: number } => row.close != null);
 }
 
 export async function GET() {
   try {
     const [spy, qqq] = await Promise.all([
-      fetchStooqSeries("spy"),
-      fetchStooqSeries("qqq"),
+      fetchYahooHistory("SPY"),
+      fetchYahooHistory("QQQ"),
     ]);
 
     return NextResponse.json({ spy, qqq });
-  } catch {
+  } catch (error) {
     return NextResponse.json(
-      { error: "Failed to load benchmarks" },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to load benchmark data",
+        spy: [],
+        qqq: [],
+      },
       { status: 500 }
     );
   }
